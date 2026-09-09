@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+artifact_model.pkl
+.venv/

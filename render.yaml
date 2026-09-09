@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: hfm-humidity-backend
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: MODEL_URL
+        sync: false
+      - key: MODEL_PATH
+        value: /app/artifact_model.pkl

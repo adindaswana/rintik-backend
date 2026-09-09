@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.git/
+artifact_model.pkl
+README_DEPLOY.md
