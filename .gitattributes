@@ -1,0 +1,2 @@
+artifacts/inference_state.json text eol=lf
+*.sh text eol=lf

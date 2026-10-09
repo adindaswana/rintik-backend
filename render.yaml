@@ -1,11 +1,4 @@
-services:
-  - type: web
-    name: hfm-humidity-backend
-    runtime: docker
-    plan: free
-    healthCheckPath: /health
-    envVars:
-      - key: MODEL_URL
-        sync: false
-      - key: MODEL_PATH
-        value: /app/artifact_model.pkl
+# Remote deployment is intentionally disabled for Milestone 1.
+# The frozen checkpoint and official provenance inputs are local-only until the
+# owner approves a deployment architecture that can mount them without mutation.
+services: []
