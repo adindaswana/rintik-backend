@@ -85,6 +85,43 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "MODEL_UNAVAILABLE")
         self.assertNotIn("predictions", response.json())
 
+    async def test_ingest_conflicts_use_explicit_http_409_envelopes(self):
+        first, second = self.runtime.ordered_dates[:2]
+        dates = self.test["datetime"].dt.strftime("%Y-%m-%d")
+        first_day = self.test.loc[dates == first, inf.INPUT_COLUMNS].copy()
+        second_day = self.test.loc[dates == second, inf.INPUT_COLUMNS].copy()
+
+        accepted = await self.client.post(
+            f"/v1/days/{first}/ingest",
+            json={"csv": first_day.to_csv(index=False)},
+            headers={"Idempotency-Key": "api-stable-key"},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+
+        altered = first_day.copy()
+        altered.loc[altered.index[0], "co2"] += 1
+        conflict = await self.client.post(
+            f"/v1/days/{first}/ingest",
+            json={"csv": altered.to_csv(index=False)},
+            headers={"Idempotency-Key": "api-stable-key"},
+        )
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()["error"]["code"], "INPUT_CONFLICT")
+
+        completed = await self.client.post(f"/v1/days/{first}/run")
+        self.assertEqual(completed.status_code, 200, completed.text)
+
+        key_conflict = await self.client.post(
+            f"/v1/days/{second}/ingest",
+            json={"csv": second_day.to_csv(index=False)},
+            headers={"Idempotency-Key": "api-stable-key"},
+        )
+        self.assertEqual(key_conflict.status_code, 409, key_conflict.text)
+        self.assertEqual(
+            key_conflict.json()["error"]["code"],
+            "IDEMPOTENCY_KEY_CONFLICT",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,4 +1,4 @@
-# RINTIK backend — frozen inference milestone
+# RINTIK backend — frozen inference and daily orchestration
 
 FastAPI backend for the official RINTIK checkpoint and chronological NSC test replay. This branch does not download a model, train a model, or fall back to generated predictions.
 
@@ -21,7 +21,16 @@ From this directory with Python 3.12:
 python -m pip install -r requirements-dev.txt
 python scripts\build_inference_state.py --check
 python -m unittest discover -s tests -v
+python scripts\verify_milestone2.py
 ```
+
+`verify_milestone2.py` performs the complete 16-date replay, restarts the
+service mid-replay, checks prefix causality and P1→P2→P3 window parity, and
+verifies old-day/final snapshot immutability. It uses a temporary SQLite file
+that is deleted after the run.
+
+The executed M2 decisions and evidence are recorded in
+[`docs/MILESTONE_2_QA.md`](docs/MILESTONE_2_QA.md).
 
 To rebuild the deterministic sidecar from the pinned official sources:
 
@@ -47,6 +56,9 @@ The stable daily contract is documented in `../contracts/API_CONTRACT.md`. Use:
 3. `GET /v1/days/{date}/result`.
 
 Repeat in chronological order. The first/last dates contain 18/44 rows; the 14 dates between contain 48 rows each.
+Retries of an already stored identical payload are idempotent. A different
+payload for the same date, or reuse of an `Idempotency-Key` for another date,
+is rejected with HTTP 409.
 
 ## Environment overrides
 
@@ -59,4 +71,4 @@ Repeat in chronological order. The first/last dates contain 18/44 rows; the 14 d
 
 ## Deployment status
 
-Remote deployment is intentionally disabled in Milestone 1. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.
+Remote deployment is intentionally disabled through Milestone 2. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.

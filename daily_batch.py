@@ -150,6 +150,31 @@ class DailyBatchService:
                     ON internal_predictions(date);
                 CREATE INDEX IF NOT EXISTS idx_published_date
                     ON published_predictions(date);
+                CREATE INDEX IF NOT EXISTS idx_daily_inputs_idempotency_key
+                    ON daily_inputs(idempotency_key);
+                """
+            )
+            conflicting_key = connection.execute(
+                """
+                SELECT idempotency_key
+                FROM daily_inputs
+                WHERE idempotency_key IS NOT NULL
+                GROUP BY idempotency_key
+                HAVING COUNT(DISTINCT date) > 1
+                LIMIT 1
+                """
+            ).fetchone()
+            if conflicting_key:
+                raise BatchError(
+                    "STATE_IDEMPOTENCY_CONFLICT",
+                    "Stored state reuses an Idempotency-Key across multiple dates.",
+                    500,
+                )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_inputs_idempotency_key
+                ON daily_inputs(idempotency_key)
+                WHERE idempotency_key IS NOT NULL
                 """
             )
             connection.commit()
@@ -211,13 +236,17 @@ class DailyBatchService:
                 "UNSUPPORTED_SCENARIO_DATE",
                 "This milestone accepts only dates from the official NSC test scenario.",
             )
-        payload_sha = inf.canonical_frame_sha256(normalized)
-        if payload_sha != manifest["payload_sha256"]:
-            raise BatchError(
-                "OFFICIAL_FIXTURE_MISMATCH",
-                "Payload differs from the pinned official test-day fixture.",
-            )
         return normalized
+
+    @staticmethod
+    def _validate_idempotency_key(idempotency_key: str | None) -> None:
+        if idempotency_key is None:
+            return
+        if not idempotency_key.strip() or len(idempotency_key) > 128:
+            raise BatchError(
+                "INVALID_IDEMPOTENCY_KEY",
+                "Idempotency-Key must contain 1 to 128 non-blank characters.",
+            )
 
     def ingest(
         self,
@@ -225,6 +254,7 @@ class DailyBatchService:
         frame: pd.DataFrame,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
+        self._validate_idempotency_key(idempotency_key)
         normalized = self._validate_daily_frame(requested_date, frame)
         payload_sha = inf.canonical_frame_sha256(normalized)
         manifest = self.runtime.manifests[requested_date]
@@ -242,8 +272,37 @@ class DailyBatchService:
                         "A different payload is already stored for this date.",
                         409,
                     )
+                if idempotency_key is not None:
+                    key_owner = connection.execute(
+                        "SELECT date FROM daily_inputs WHERE idempotency_key = ?",
+                        (idempotency_key,),
+                    ).fetchone()
+                    if key_owner and key_owner["date"] != requested_date:
+                        raise BatchError(
+                            "IDEMPOTENCY_KEY_CONFLICT",
+                            "Idempotency-Key is already associated with another date.",
+                            409,
+                        )
                 connection.commit()
                 return self._ingest_result(existing, idempotent=True)
+
+            if idempotency_key is not None:
+                key_owner = connection.execute(
+                    "SELECT date FROM daily_inputs WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if key_owner:
+                    raise BatchError(
+                        "IDEMPOTENCY_KEY_CONFLICT",
+                        "Idempotency-Key is already associated with another date.",
+                        409,
+                    )
+
+            if payload_sha != manifest["payload_sha256"]:
+                raise BatchError(
+                    "OFFICIAL_FIXTURE_MISMATCH",
+                    "Payload differs from the pinned official test-day fixture.",
+                )
 
             count = connection.execute("SELECT COUNT(*) FROM daily_inputs").fetchone()[0]
             if count >= len(self.runtime.ordered_dates):
