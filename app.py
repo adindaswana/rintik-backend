@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 import inference as inf
 from daily_batch import BatchError, DailyBatchService, FrozenRuntime
+from monitoring import MonitoringService
 
 LOGGER = logging.getLogger("rintik.backend")
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -44,15 +45,25 @@ TEST_PATH = Path(os.environ.get(
     "RINTIK_TEST_PATH",
     PROTOTYPE_DIR / "reference" / "official" / "test.csv",
 ))
+SYNTHETIC_FIXTURE_PATH = Path(os.environ.get(
+    "RINTIK_SYNTHETIC_FIXTURE_PATH",
+    PROTOTYPE_DIR / "demo" / "fixtures" / "synthetic_physical_humidity_SENSOR_SIMULATION.csv",
+))
+SYNTHETIC_PROVENANCE_PATH = Path(os.environ.get(
+    "RINTIK_SYNTHETIC_PROVENANCE_PATH",
+    PROTOTYPE_DIR / "demo" / "fixtures" / "SOURCE_PROVENANCE.json",
+))
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 1000
 
 SERVICE: DailyBatchService | None = None
+MONITORING: MonitoringService | None = None
 INITIALIZATION_ERROR: str | None = None
+MONITORING_INITIALIZATION_ERROR: str | None = None
 
 
 def initialize_service() -> DailyBatchService:
-    global SERVICE, INITIALIZATION_ERROR
+    global SERVICE, MONITORING, INITIALIZATION_ERROR, MONITORING_INITIALIZATION_ERROR
     try:
         runtime = FrozenRuntime(
             MODEL_PATH,
@@ -62,12 +73,27 @@ def initialize_service() -> DailyBatchService:
         )
         SERVICE = DailyBatchService(runtime, DATABASE_PATH)
         INITIALIZATION_ERROR = None
-        return SERVICE
     except Exception as exc:
         SERVICE = None
-        INITIALIZATION_ERROR = f"{type(exc).__name__}: {exc}"
+        MONITORING = None
+        INITIALIZATION_ERROR = "Frozen model runtime failed integrity or startup checks."
+        MONITORING_INITIALIZATION_ERROR = "Model runtime is unavailable."
         LOGGER.exception("RINTIK runtime initialization failed")
         raise
+    try:
+        MONITORING = MonitoringService(
+            SERVICE,
+            SYNTHETIC_FIXTURE_PATH,
+            SYNTHETIC_PROVENANCE_PATH,
+        )
+        MONITORING_INITIALIZATION_ERROR = None
+    except Exception as exc:
+        MONITORING = None
+        MONITORING_INITIALIZATION_ERROR = (
+            "Synthetic monitoring fixture failed integrity or startup checks."
+        )
+        LOGGER.exception("RINTIK synthetic monitoring initialization failed")
+    return SERVICE
 
 
 @asynccontextmanager
@@ -81,7 +107,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="RINTIK Frozen Inference API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="RINTIK Frozen Inference API", version="1.1.0", lifespan=lifespan)
 allowed_origins = [
     item.strip()
     for item in os.environ.get(
@@ -113,6 +139,17 @@ def require_service() -> DailyBatchService:
             503,
         )
     return SERVICE
+
+
+def require_monitoring() -> MonitoringService:
+    require_service()
+    if MONITORING is None:
+        raise BatchError(
+            "MONITORING_UNAVAILABLE",
+            "Synthetic demo monitoring is unavailable; real model results were not replaced.",
+            503,
+        )
+    return MONITORING
 
 
 async def request_json(request: Request) -> Any:
@@ -172,7 +209,21 @@ def health() -> JSONResponse:
                 "error": INITIALIZATION_ERROR or "Runtime has not initialized.",
             },
         )
-    return JSONResponse(status_code=200, content={"status": "ok", **SERVICE.status()})
+    monitoring_status = (
+        MONITORING.status()
+        if MONITORING is not None
+        else {
+            "monitoring_ready": False,
+            "monitoring_mode": "synthetic_demo",
+            "monitoring_simulation": True,
+            "monitoring_error": MONITORING_INITIALIZATION_ERROR,
+        }
+    )
+    state = "ok" if MONITORING is not None else "degraded"
+    return JSONResponse(
+        status_code=200,
+        content={"status": state, **SERVICE.status(), **monitoring_status},
+    )
 
 
 @app.post("/v1/days/{requested_date}/ingest")
@@ -202,6 +253,66 @@ def list_days() -> dict[str, Any]:
 def day_result(requested_date: str) -> dict[str, Any]:
     service = require_service()
     return service.get_result(requested_date)
+
+
+@app.post("/v1/demo/days/{requested_date}/monitor")
+async def monitor_day(requested_date: str) -> dict[str, Any]:
+    monitoring = require_monitoring()
+    return await asyncio.to_thread(monitoring.monitor_day, requested_date)
+
+
+@app.get("/v1/demo/days/{requested_date}/monitoring")
+def monitoring_result(requested_date: str) -> dict[str, Any]:
+    monitoring = require_monitoring()
+    return monitoring.get_monitoring(requested_date)
+
+
+@app.get("/v1/demo/incidents")
+def list_demo_incidents() -> dict[str, Any]:
+    monitoring = require_monitoring()
+    return {"mode": "synthetic_demo", "simulation": True, "incidents": monitoring.list_incidents()}
+
+
+@app.post("/v1/demo/audits")
+async def create_demo_audit(request: Request) -> dict[str, Any]:
+    monitoring = require_monitoring()
+    body = await request_json(request)
+    if not isinstance(body, dict) or set(body) != {"scenario"}:
+        raise BatchError("INVALID_BODY", "Provide exactly one demo audit scenario.")
+    return await asyncio.to_thread(
+        monitoring.create_demo_audit,
+        body["scenario"],
+        request.headers.get("idempotency-key"),
+    )
+
+
+@app.get("/v1/demo/audits/current")
+def current_demo_audit() -> dict[str, Any]:
+    monitoring = require_monitoring()
+    return monitoring.get_current_audit()
+
+
+@app.post("/v1/demo/incidents/{incident_id}/confirm")
+async def confirm_demo_incident(incident_id: str, request: Request) -> dict[str, Any]:
+    monitoring = require_monitoring()
+    body = await request_json(request)
+    if not isinstance(body, dict) or set(body) - {"demo_override", "note"}:
+        raise BatchError(
+            "INVALID_BODY",
+            "Confirmation accepts only demo_override and an optional note.",
+        )
+    if not isinstance(body.get("demo_override", False), bool):
+        raise BatchError("INVALID_BODY", "demo_override must be a boolean.")
+    note = body.get("note")
+    if note is not None and not isinstance(note, str):
+        raise BatchError("INVALID_BODY", "note must be a string when provided.")
+    return await asyncio.to_thread(
+        monitoring.confirm_incident,
+        incident_id,
+        body.get("demo_override", False),
+        note,
+        request.headers.get("idempotency-key"),
+    )
 
 
 @app.post("/predict")

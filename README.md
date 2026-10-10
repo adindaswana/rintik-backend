@@ -1,6 +1,6 @@
-# RINTIK backend — frozen inference and daily orchestration
+# RINTIK backend — frozen inference, daily orchestration, and demo monitoring
 
-FastAPI backend for the official RINTIK checkpoint and chronological NSC test replay. This branch does not download a model, train a model, or fall back to generated predictions.
+FastAPI backend for the official RINTIK checkpoint, chronological NSC test replay, and explicitly synthetic monitoring/recovery scenario. It does not download or train a model, and it never falls back to generated predictions.
 
 ## Protected inputs
 
@@ -22,6 +22,7 @@ python -m pip install -r requirements-dev.txt
 python scripts\build_inference_state.py --check
 python -m unittest discover -s tests -v
 python scripts\verify_milestone2.py
+python scripts\verify_milestone3.py
 ```
 
 `verify_milestone2.py` performs the complete 16-date replay, restarts the
@@ -29,8 +30,9 @@ service mid-replay, checks prefix causality and P1→P2→P3 window parity, and
 verifies old-day/final snapshot immutability. It uses a temporary SQLite file
 that is deleted after the run.
 
-The executed M2 decisions and evidence are recorded in
-[`docs/MILESTONE_2_QA.md`](docs/MILESTONE_2_QA.md).
+The executed milestone decisions and evidence are recorded in
+[`docs/MILESTONE_2_QA.md`](docs/MILESTONE_2_QA.md) and
+[`docs/MILESTONE_3_QA.md`](docs/MILESTONE_3_QA.md).
 
 To rebuild the deterministic sidecar from the pinned official sources:
 
@@ -60,6 +62,21 @@ Retries of an already stored identical payload are idempotent. A different
 payload for the same date, or reuse of an `Idempotency-Key` for another date,
 is rejected with HTTP 409.
 
+After a daily run, the separate `/v1/demo` namespace can replay the pinned
+synthetic RH scenario:
+
+1. `POST /v1/demo/days/{date}/monitor`;
+2. `GET /v1/demo/days/{date}/monitoring`;
+3. `GET /v1/demo/incidents`;
+4. `POST /v1/demo/audits` with an explicit simulated scenario;
+5. `POST /v1/demo/incidents/{incident_id}/confirm` with an idempotency key.
+
+Every monitoring response declares `mode=synthetic_demo`, `simulation=true`,
+`model_input=false`, and `accuracy_ground_truth=false`. Recovery values are
+stored separately as `source=model_estimate`; raw simulated sensor values are
+not overwritten. Thresholds and Model Health are illustrative operational
+heuristics, not calibrated accuracy evidence.
+
 ## Environment overrides
 
 - `RINTIK_MODEL_PATH`
@@ -67,8 +84,10 @@ is rejected with HTTP 409.
 - `RINTIK_TRAIN_PATH`
 - `RINTIK_TEST_PATH`
 - `RINTIK_DATABASE_PATH`
+- `RINTIK_SYNTHETIC_FIXTURE_PATH`
+- `RINTIK_SYNTHETIC_PROVENANCE_PATH`
 - `RINTIK_CORS_ORIGINS`
 
 ## Deployment status
 
-Remote deployment is intentionally disabled through Milestone 2. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.
+Remote deployment remains intentionally disabled through Milestone 3. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.
