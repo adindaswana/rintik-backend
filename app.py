@@ -14,11 +14,12 @@ from typing import Any
 import pandas as pd
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 import inference as inf
 from daily_batch import BatchError, DailyBatchService, FrozenRuntime
 from monitoring import MonitoringService
+from operator_api import OperatorDataService, feature_catalog
 
 LOGGER = logging.getLogger("rintik.backend")
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -253,6 +254,32 @@ def list_days() -> dict[str, Any]:
 def day_result(requested_date: str) -> dict[str, Any]:
     service = require_service()
     return service.get_result(requested_date)
+
+
+@app.get("/v1/features")
+def list_features() -> dict[str, Any]:
+    require_service()
+    return feature_catalog()
+
+
+@app.get("/v1/days/{requested_date}/series")
+def day_sensor_series(requested_date: str) -> dict[str, Any]:
+    service = require_service()
+    return OperatorDataService(service).get_series(requested_date)
+
+
+@app.get("/v1/days/{requested_date}/export.csv")
+def export_day(requested_date: str) -> Response:
+    service = require_service()
+    csv_text = OperatorDataService(service).export_day_csv(requested_date)
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="rintik-{requested_date}.csv"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/v1/demo/days/{requested_date}/monitor")

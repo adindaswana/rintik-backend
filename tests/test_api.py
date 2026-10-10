@@ -162,6 +162,21 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repeated.status_code, 200, repeated.text)
         self.assertTrue(repeated.json()["idempotent"])
 
+        features = await self.client.get("/v1/features")
+        self.assertEqual(features.status_code, 200, features.text)
+        self.assertEqual(
+            sum(len(group["features"]) for group in features.json()["groups"]),
+            23,
+        )
+        series = await self.client.get(f"/v1/days/{first}/series")
+        self.assertEqual(series.status_code, 200, series.text)
+        self.assertEqual(series.json()["row_count"], 18)
+        exported = await self.client.get(f"/v1/days/{first}/export.csv")
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertEqual(exported.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(len(exported.text.splitlines()), 19)
+        self.assertIn("prediction_source", exported.text.splitlines()[0])
+
     async def test_monitoring_unavailable_is_503_without_fake_payload(self):
         api.MONITORING = None
         api.MONITORING_INITIALIZATION_ERROR = "test fixture integrity failure"

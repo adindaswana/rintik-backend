@@ -1,4 +1,4 @@
-# RINTIK backend — frozen inference, daily orchestration, and demo monitoring
+# RINTIK backend — frozen inference, daily orchestration, and operator data
 
 FastAPI backend for the official RINTIK checkpoint, chronological NSC test replay, and explicitly synthetic monitoring/recovery scenario. It does not download or train a model, and it never falls back to generated predictions.
 
@@ -32,7 +32,8 @@ that is deleted after the run.
 
 The executed milestone decisions and evidence are recorded in
 [`docs/MILESTONE_2_QA.md`](docs/MILESTONE_2_QA.md) and
-[`docs/MILESTONE_3_QA.md`](docs/MILESTONE_3_QA.md).
+[`docs/MILESTONE_3_QA.md`](docs/MILESTONE_3_QA.md). M4 operator API evidence is
+in [`docs/MILESTONE_4_QA.md`](docs/MILESTONE_4_QA.md).
 
 To rebuild the deterministic sidecar from the pinned official sources:
 
@@ -56,6 +57,16 @@ The stable daily contract is documented in `../contracts/API_CONTRACT.md`. Use:
 1. `POST /v1/days/{date}/ingest` with one exact official test day;
 2. `POST /v1/days/{date}/run`;
 3. `GET /v1/days/{date}/result`.
+
+The read-only operator surface also provides:
+
+- `GET /v1/features` for the grouped, unit-bearing feature catalog;
+- `GET /v1/days/{date}/series` for canonical stored input values, with missing
+  values serialized as JSON `null`;
+- `GET /v1/days/{date}/export.csv` for current-day model stages, hashes,
+  window lineage, synthetic sensor provenance, incident state, and recovery
+  source in one CSV. The export is spreadsheet-formula-safe and carries
+  `X-Content-Type-Options: nosniff`.
 
 Repeat in chronological order. The first/last dates contain 18/44 rows; the 14 dates between contain 48 rows each.
 Retries of an already stored identical payload are idempotent. A different
@@ -90,4 +101,4 @@ heuristics, not calibrated accuracy evidence.
 
 ## Deployment status
 
-Remote deployment remains intentionally disabled through Milestone 3. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.
+Remote deployment remains intentionally disabled through Milestone 4. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.
