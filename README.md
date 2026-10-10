@@ -23,7 +23,15 @@ python scripts\build_inference_state.py --check
 python -m unittest discover -s tests -v
 python scripts\verify_milestone2.py
 python scripts\verify_milestone3.py
+python scripts\preflight_demo.py
 ```
+
+`preflight_demo.py` is the M5 fail-closed venue check. It verifies exact pinned
+dependency versions, model/state/source hashes, all 16 daily fixture hashes,
+synthetic provenance, and a disposable clean SQLite schema without inference.
+Pass `--database <path> --api-url http://127.0.0.1:8140` to additionally check
+an active demo database and the exact live readiness response. See
+[`docs/MILESTONE_5_PREFLIGHT.md`](docs/MILESTONE_5_PREFLIGHT.md).
 
 `verify_milestone2.py` performs the complete 16-date replay, restarts the
 service mid-replay, checks prefix causality and P1→P2→P3 window parity, and
@@ -101,4 +109,4 @@ heuristics, not calibrated accuracy evidence.
 
 ## Deployment status
 
-Remote deployment remains intentionally disabled through Milestone 4. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.
+Remote deployment remains intentionally disabled through Milestone 5. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.
