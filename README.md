@@ -76,6 +76,14 @@ The read-only operator surface also provides:
   source in one CSV. The export is spreadsheet-formula-safe and carries
   `X-Content-Type-Options: nosniff`.
 
+For the local public-page example button,
+`GET /v1/demo/official-input/next` returns only the next pinned official input
+CSV plus source/day hashes and `prediction_produced=false`. The route rechecks
+the official source and daily manifest on every request. It does not infer,
+bypass chronological ingest, or mutate state. The exact 734-row compatibility
+route remains `POST /predict`; it is hash-gated, stateless, and returns frozen
+model/state/pipeline provenance.
+
 Repeat in chronological order. The first/last dates contain 18/44 rows; the 14 dates between contain 48 rows each.
 Retries of an already stored identical payload are idempotent. A different
 payload for the same date, or reuse of an `Idempotency-Key` for another date,

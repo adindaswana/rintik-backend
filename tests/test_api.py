@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import uuid
 import unittest
@@ -81,6 +82,81 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(body["predictions"]), 18)
         self.assertIn("pred_internal", body["predictions"][0])
         self.assertIn("post_3", body["predictions"][0])
+
+    async def test_next_official_demo_input_is_verified_and_advances_with_state(self):
+        first, second = self.runtime.ordered_dates[:2]
+        fixture = await self.client.get("/v1/demo/official-input/next")
+        self.assertEqual(fixture.status_code, 200, fixture.text)
+        body = fixture.json()
+        self.assertEqual(body["date"], first)
+        self.assertEqual(body["row_count"], 18)
+        self.assertEqual(body["source"], "official_test_csv")
+        self.assertFalse(body["simulation"])
+        self.assertFalse(body["prediction_produced"])
+        self.assertEqual(
+            body["official_test_sha256"],
+            self.runtime.sidecar["sources"]["test"]["sha256"],
+        )
+        parsed = pd.read_csv(io.StringIO(body["csv"]))
+        self.assertEqual(list(parsed.columns), inf.INPUT_COLUMNS)
+        self.assertEqual(len(parsed), 18)
+
+        ingest = await self.client.post(
+            f"/v1/days/{first}/ingest",
+            json={"csv": body["csv"]},
+            headers={"Idempotency-Key": "demo-helper-first"},
+        )
+        self.assertEqual(ingest.status_code, 200, ingest.text)
+        run = await self.client.post(f"/v1/days/{first}/run")
+        self.assertEqual(run.status_code, 200, run.text)
+
+        advanced = await self.client.get("/v1/demo/official-input/next")
+        self.assertEqual(advanced.status_code, 200, advanced.text)
+        self.assertEqual(advanced.json()["date"], second)
+        self.assertEqual(advanced.json()["row_count"], 48)
+
+    async def test_full_compatibility_api_is_real_stateless_and_hash_gated(self):
+        official = self.test.loc[:, inf.INPUT_COLUMNS]
+        accepted = await self.client.post(
+            "/predict",
+            json={"csv": official.to_csv(index=False)},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        body = accepted.json()
+        self.assertEqual(body["count"], 734)
+        self.assertEqual(body["source"], "real_original_pth")
+        self.assertFalse(body["simulation"])
+        self.assertEqual(body["model_sha256"], inf.OFFICIAL_MODEL_SHA256)
+        self.assertEqual(body["state_sha256"], self.runtime.state_sha256)
+        self.assertEqual(body["pipeline_version"], inf.PIPELINE_VERSION)
+        self.assertEqual(api.SERVICE.status()["completed_days"], 0)
+
+        altered = official.copy()
+        altered.loc[altered.index[0], "co2"] += 1
+        rejected = await self.client.post(
+            "/predict",
+            json={"csv": altered.to_csv(index=False)},
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertEqual(rejected.json()["error"]["code"], "OFFICIAL_FIXTURE_MISMATCH")
+        self.assertNotIn("predictions", rejected.json())
+
+    async def test_next_official_demo_input_reports_completed_scenario(self):
+        real_service = api.SERVICE
+
+        class CompletedService:
+            @staticmethod
+            def status():
+                return {"next_expected_date": None}
+
+        try:
+            api.SERVICE = CompletedService()
+            response = await self.client.get("/v1/demo/official-input/next")
+        finally:
+            api.SERVICE = real_service
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "SCENARIO_COMPLETE")
+        self.assertNotIn("predictions", response.json())
 
     async def test_unavailable_runtime_is_503_without_success_payload(self):
         api.SERVICE = None

@@ -108,12 +108,12 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="RINTIK Frozen Inference API", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="RINTIK Frozen Inference API", version="1.2.0", lifespan=lifespan)
 allowed_origins = [
     item.strip()
     for item in os.environ.get(
         "RINTIK_CORS_ORIGINS",
-        "http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,http://localhost:5173",
+        "http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:4174,http://localhost:4174,http://127.0.0.1:5173,http://localhost:5173",
     ).split(",")
     if item.strip()
 ]
@@ -250,6 +250,56 @@ def list_days() -> dict[str, Any]:
     return {"days": service.list_days(), "runtime": service.status()}
 
 
+@app.get("/v1/demo/official-input/next")
+def next_official_demo_input() -> dict[str, Any]:
+    """Return the next pinned official day as input, never as a prediction."""
+    service = require_service()
+    next_date = service.status()["next_expected_date"]
+    if next_date is None:
+        raise BatchError(
+            "SCENARIO_COMPLETE",
+            "All official test dates are already processed; no next demo input exists.",
+            409,
+        )
+
+    expected_source_sha256 = service.runtime.sidecar["sources"]["test"]["sha256"]
+    if not TEST_PATH.is_file() or inf.sha256_file(TEST_PATH) != expected_source_sha256:
+        raise BatchError(
+            "OFFICIAL_SOURCE_UNAVAILABLE",
+            "The pinned official test source failed its integrity check.",
+            503,
+        )
+    try:
+        frame = inf.canonical_input_frame(pd.read_csv(TEST_PATH))
+    except Exception as exc:
+        raise BatchError(
+            "OFFICIAL_SOURCE_UNAVAILABLE",
+            "The pinned official test source could not be read safely.",
+            503,
+        ) from exc
+    dates = frame["datetime"].dt.strftime("%Y-%m-%d")
+    day = frame.loc[dates == next_date, inf.INPUT_COLUMNS].copy()
+    manifest = service.runtime.manifests[next_date]
+    payload_sha256 = inf.canonical_frame_sha256(day)
+    if len(day) != manifest["row_count"] or payload_sha256 != manifest["payload_sha256"]:
+        raise BatchError(
+            "OFFICIAL_SOURCE_UNAVAILABLE",
+            "The next official daily fixture failed its integrity check.",
+            503,
+        )
+    return {
+        "mode": "official_test_fixture_demo",
+        "source": "official_test_csv",
+        "simulation": False,
+        "prediction_produced": False,
+        "date": next_date,
+        "row_count": len(day),
+        "payload_sha256": payload_sha256,
+        "official_test_sha256": expected_source_sha256,
+        "csv": day.to_csv(index=False, date_format="%Y-%m-%d %H:%M:%S"),
+    }
+
+
 @app.get("/v1/days/{requested_date}/result")
 def day_result(requested_date: str) -> dict[str, Any]:
     service = require_service()
@@ -375,6 +425,9 @@ async def predict_full_submission(request: Request) -> dict[str, Any]:
         "count": len(predictions),
         "source": "real_original_pth",
         "simulation": False,
+        "model_sha256": service.runtime.model_sha256,
+        "state_sha256": service.runtime.state_sha256,
+        "pipeline_version": inf.PIPELINE_VERSION,
         "predictions": predictions,
         "stats": {
             "mean": round(float(values.mean()), 2),
