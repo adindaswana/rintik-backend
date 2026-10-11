@@ -310,17 +310,60 @@ class MonitoringService:
                     ON recovery_estimates(date);
                 """
             )
-            initial_id = "audit_initial_simulated_demo"
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO demo_accuracy_audits (
-                    audit_id, status, outcome, independent_reference,
-                    allows_automatic_recovery, label, idempotency_key, created_at
-                ) VALUES (?, 'simulated_demo', 'pass', 0, 0, ?, NULL, ?)
-                """,
-                (initial_id, "simulation_not_independent_accuracy_evidence", utc_now()),
-            )
+            self._insert_initial_audit(connection)
             connection.commit()
+
+    @staticmethod
+    def _insert_initial_audit(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO demo_accuracy_audits (
+                audit_id, status, outcome, independent_reference,
+                allows_automatic_recovery, label, idempotency_key, created_at
+            ) VALUES ('audit_initial_simulated_demo', 'simulated_demo', 'pass',
+                      0, 0, 'simulation_not_independent_accuracy_evidence', NULL, ?)
+            """,
+            (utc_now(),),
+        )
+
+    def reset_demo_state(self) -> dict[str, Any]:
+        """Clear persisted demo replay state without touching immutable artifacts."""
+        tables = (
+            "recovery_estimates",
+            "incident_actions",
+            "sensor_incidents",
+            "monitoring_runs",
+            "model_health_logs",
+            "demo_sensor_observations",
+            "demo_accuracy_audits",
+            "published_predictions",
+            "internal_predictions",
+            "runs",
+            "daily_inputs",
+        )
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            removed = {
+                table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in tables
+            }
+            for table in tables:
+                connection.execute(f"DELETE FROM {table}")
+            connection.execute(
+                "DELETE FROM sqlite_sequence WHERE name = 'demo_accuracy_audits'"
+            )
+            self._insert_initial_audit(connection)
+            connection.commit()
+        return {
+            "reset": True,
+            "mode": "synthetic_demo",
+            "simulation": True,
+            "removed": removed,
+            "model_sha256": self.daily.runtime.model_sha256,
+            "state_sha256": self.daily.runtime.state_sha256,
+            "runtime": self.daily.status(),
+            "monitoring": self.status(),
+        }
 
     @staticmethod
     def _validate_key(value: str | None) -> str:

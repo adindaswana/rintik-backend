@@ -115,6 +115,56 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(advanced.json()["date"], second)
         self.assertEqual(advanced.json()["row_count"], 48)
 
+    async def test_demo_reset_is_explicit_complete_and_preserves_frozen_identity(self):
+        first = self.runtime.ordered_dates[0]
+        fixture = (await self.client.get("/v1/demo/official-input/next")).json()
+        ingested = await self.client.post(
+            f"/v1/days/{first}/ingest",
+            json={"csv": fixture["csv"]},
+            headers={"Idempotency-Key": "reset-seed"},
+        )
+        self.assertEqual(ingested.status_code, 200, ingested.text)
+        completed = await self.client.post(f"/v1/days/{first}/run")
+        self.assertEqual(completed.status_code, 200, completed.text)
+        monitored = await self.client.post(f"/v1/demo/days/{first}/monitor")
+        self.assertEqual(monitored.status_code, 200, monitored.text)
+
+        rejected = await self.client.post(
+            "/v1/demo/reset", json={"confirmation": "reset"}
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertEqual(
+            rejected.json()["error"]["code"], "RESET_CONFIRMATION_REQUIRED"
+        )
+        self.assertEqual(api.SERVICE.status()["completed_days"], 1)
+
+        reset = await self.client.post(
+            "/v1/demo/reset", json={"confirmation": "RESET_DEMO_STATE"}
+        )
+        self.assertEqual(reset.status_code, 200, reset.text)
+        body = reset.json()
+        self.assertTrue(body["reset"])
+        self.assertEqual(body["removed"]["runs"], 1)
+        self.assertEqual(body["removed"]["monitoring_runs"], 1)
+        self.assertEqual(body["model_sha256"], inf.OFFICIAL_MODEL_SHA256)
+        self.assertEqual(body["state_sha256"], self.runtime.state_sha256)
+        self.assertEqual(body["runtime"]["completed_days"], 0)
+        self.assertEqual(body["runtime"]["next_expected_date"], first)
+        self.assertEqual(body["monitoring"]["monitored_days"], 0)
+        self.assertEqual(body["monitoring"]["incident_count"], 0)
+        self.assertEqual(body["monitoring"]["recovery_estimate_rows"], 0)
+
+        days = await self.client.get("/v1/days")
+        self.assertEqual(days.status_code, 200, days.text)
+        self.assertEqual(days.json()["days"], [])
+        incidents = await self.client.get("/v1/demo/incidents")
+        self.assertEqual(incidents.json()["incidents"], [])
+        old_result = await self.client.get(f"/v1/days/{first}/result")
+        self.assertEqual(old_result.status_code, 404, old_result.text)
+        audit = await self.client.get("/v1/demo/audits/current")
+        self.assertEqual(audit.json()["audit_id"], "audit_initial_simulated_demo")
+        self.assertEqual(audit.json()["status"], "simulated_demo")
+
     async def test_full_compatibility_api_is_real_stateless_and_hash_gated(self):
         official = self.test.loc[:, inf.INPUT_COLUMNS]
         accepted = await self.client.post(

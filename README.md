@@ -84,6 +84,13 @@ bypass chronological ingest, or mutate state. The exact 734-row compatibility
 route remains `POST /predict`; it is hash-gated, stateless, and returns frozen
 model/state/pipeline provenance.
 
+`POST /v1/demo/reset` accepts only the exact body
+`{"confirmation":"RESET_DEMO_STATE"}`. It transactionally clears the local
+demo replay and monitoring tables, then restores the initial simulated audit.
+The response reports removed row counts and unchanged frozen model/state
+hashes. It never deletes or edits the checkpoint, sidecar, or official
+fixtures.
+
 Repeat in chronological order. The first/last dates contain 18/44 rows; the 14 dates between contain 48 rows each.
 Retries of an already stored identical payload are idempotent. A different
 payload for the same date, or reuse of an `Idempotency-Key` for another date,

@@ -300,6 +300,19 @@ def next_official_demo_input() -> dict[str, Any]:
     }
 
 
+@app.post("/v1/demo/reset")
+async def reset_demo_state(request: Request) -> dict[str, Any]:
+    """Explicitly reset local demo persistence; immutable artifacts are untouched."""
+    monitoring = require_monitoring()
+    body = await request_json(request)
+    if body != {"confirmation": "RESET_DEMO_STATE"}:
+        raise BatchError(
+            "RESET_CONFIRMATION_REQUIRED",
+            "Demo reset requires the exact confirmation RESET_DEMO_STATE.",
+        )
+    return await asyncio.to_thread(monitoring.reset_demo_state)
+
+
 @app.get("/v1/days/{requested_date}/result")
 def day_result(requested_date: str) -> dict[str, Any]:
     service = require_service()
