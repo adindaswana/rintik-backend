@@ -121,24 +121,51 @@ def build_features(frame, DRIV):
     return full
 
 
-def predict_df(test_df, art, boosters):
+def _context_frame(test, art):
+    """Gabungkan baris konteks artefak (29 Agu 00:00-14:30) dengan unggahan.
+
+    Konteks hanya dipakai bila unggahan punya baris pada hari konteks itu
+    (fungsinya melengkapi agregat harian dan lag dalam-hari hari tersebut).
+    Hari lain tidak terpengaruh konteks karena semua fitur dihitung per hari.
+    Datetime yang sama di konteks dan unggahan: baris unggahan yang dipakai.
+    Kolom `_src` menandai asal baris supaya indeks unggahan diambil lewat mask,
+    bukan lewat asumsi "konteks selalu di depan" (bug lama: unggahan bertanggal
+    sebelum 29 Agu membuat konteks tersortir ke belakang dan indeks bergeser).
+    """
+    test = test.assign(_src="upload")
+    dc = art.get("inference_state", {}).get("day_context", {})
+    ctx_rows = dc.get("rows", [])
+    if ctx_rows:
+        ctx = pd.DataFrame(ctx_rows)
+        ctx["datetime"] = pd.to_datetime(ctx["datetime"])
+        ctx = ctx.drop(columns=[art.get("target", "air_humidity")], errors="ignore")
+        ctx_days = set(ctx["datetime"].dt.floor("D"))
+        if ctx_days & set(test["datetime"].dt.floor("D")):
+            ctx = ctx[~ctx["datetime"].isin(set(test["datetime"]))].assign(_src="context")
+            frame = pd.concat([ctx, test], ignore_index=True)
+            return frame.sort_values("datetime", kind="mergesort").reset_index(drop=True)
+    return test.reset_index(drop=True)
+
+
+def predict_detail(test_df, art, boosters):
+    """Jalankan pipeline penuh dan kembalikan P3 (final) beserta tebakan inti.
+
+    Return dict:
+      index  : label indeks test_df dalam urutan keluaran (urut datetime)
+      datetime, p3, inti : array sejajar index
+    Kolom target (air_humidity) di unggahan dibuang sebelum fitur dibangun.
+    """
     TARGET = art["target"]
     FE = art["feature_engineering"]
     DRIV, DAG = FE["DRIV"], FE["DAG"]
     S2, S2B = art["stage2"]["A"]["features"], art["stage2"]["B"]["features"]
 
-    test = test_df.sort_values("datetime").reset_index(drop=True)
-    ctx_rows = art.get("inference_state", {}).get("day_context", {}).get("rows", [])
-    if ctx_rows:
-        ctx = pd.DataFrame(ctx_rows)
-        ctx["datetime"] = pd.to_datetime(ctx["datetime"])
-        have = set(test["datetime"].astype(str))
-        ctx = ctx[~ctx["datetime"].astype(str).isin(have)]
-        frame = pd.concat([ctx, test], ignore_index=True).sort_values("datetime").reset_index(drop=True)
-        n_skip = len(ctx)
-    else:
-        frame = test.copy()
-        n_skip = 0
+    test = test_df.drop(columns=[TARGET, "_src"], errors="ignore").sort_values("datetime", kind="mergesort")
+    out_index = test.index.to_numpy()
+    test = test.reset_index(drop=True)
+    frame = _context_frame(test, art)
+    tei = np.flatnonzero(frame["_src"].to_numpy() == "upload")
+    frame = frame.drop(columns=["_src"])
 
     full = build_features(frame, DRIV)
     DFEAT = list(dict.fromkeys(DAG + [c + s for c in DRIV for s in ["_dm", "_dsd", "_dmin", "_dmax"]]))
@@ -165,7 +192,6 @@ def predict_df(test_df, art, boosters):
             lvl_series[dd] = base[dd] + carry["weight"] * st["carry_r0"] * (carry["rho"] ** k)
     full["lvl"] = full["day"].map(lvl_series)
 
-    tei = list(range(n_skip, n_skip + len(test)))
     fx = full.copy()
     fx["phys_dev"] = full["lvl"] * full["phys_ratio"] - full["lvl"]
     for L in [1, 2, 3, 6, 12]:
@@ -200,8 +226,19 @@ def predict_df(test_df, art, boosters):
         test["datetime"], pm["slot_blend_weight"]))
     final_prediction = clip100(0.97 * beam4 + 0.03 * causal_ewm(beam4, pm["beam_ewm_alpha"]))
 
+    return {
+        "index": out_index,
+        "datetime": test["datetime"].to_numpy(),
+        "p3": final_prediction,
+        "inti": pred_internal,
+    }
+
+
+def predict_df(test_df, art, boosters):
+    """Kompatibel dengan versi lama: (preds [{datetime, air_humidity}], stats)."""
+    det = predict_detail(test_df, art, boosters)
+    vals = det["p3"]
     preds = [{"datetime": d, "air_humidity": float(v)} for d, v in zip(
-        test["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S"), np.round(final_prediction, 4))]
-    vals = final_prediction
+        pd.Series(det["datetime"]).dt.strftime("%Y-%m-%d %H:%M:%S"), np.round(vals, 4))]
     stats = {"mean": round(float(vals.mean()), 2), "min": round(float(vals.min()), 2), "max": round(float(vals.max()), 2)}
     return preds, stats
