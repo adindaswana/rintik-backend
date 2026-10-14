@@ -13,6 +13,7 @@ import app as api
 import inference as inf
 from daily_batch import DailyBatchService, FrozenRuntime
 from monitoring import MonitoringService
+from operational_simulation import OperationalSimulationService
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ PROTOTYPE_DIR = BACKEND_DIR.parent
 WORKSPACE_DIR = PROTOTYPE_DIR.parent
 OFFICIAL_DIR = PROTOTYPE_DIR / "reference" / "official"
 DEMO_FIXTURES = PROTOTYPE_DIR / "demo" / "fixtures"
+OPERATIONAL_FIXTURES = BACKEND_DIR / "fixtures"
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
@@ -32,6 +34,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             OFFICIAL_DIR / "test.csv",
         )
         cls.test = pd.read_csv(OFFICIAL_DIR / "test.csv", parse_dates=["datetime"])
+        cls.operational_fixture = pd.read_csv(
+            OPERATIONAL_FIXTURES / "operational_2026_exogenous.csv"
+        )
 
     async def asyncSetUp(self):
         self.database = BACKEND_DIR / "runtime" / f"test-api-{uuid.uuid4().hex}.sqlite3"
@@ -40,6 +45,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             api.SERVICE,
             DEMO_FIXTURES / "synthetic_physical_humidity_SENSOR_SIMULATION.csv",
             DEMO_FIXTURES / "SOURCE_PROVENANCE.json",
+        )
+        api.OPERATIONAL = OperationalSimulationService(
+            self.runtime,
+            self.database,
+            OPERATIONAL_FIXTURES / "operational_2026_exogenous.csv",
+            OPERATIONAL_FIXTURES / "operational_2026_provenance.json",
         )
         api.INITIALIZATION_ERROR = None
         api.MONITORING_INITIALIZATION_ERROR = None
@@ -52,8 +63,60 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
         api.SERVICE = None
         api.MONITORING = None
+        api.OPERATIONAL = None
         for suffix in ("", "-wal", "-shm"):
             Path(str(self.database) + suffix).unlink(missing_ok=True)
+
+    async def test_operational_http_contract_and_cors_are_explicit(self):
+        health = await self.client.get("/health")
+        self.assertEqual(
+            health.json()["operational_simulation"]["mode"],
+            "synthetic-operational-2026-v1",
+        )
+
+        preflight = await self.client.options(
+            "/v1/operational/days/2026-10-14/readings",
+            headers={
+                "Origin": "http://127.0.0.1:4174",
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        self.assertEqual(preflight.status_code, 200, preflight.text)
+        self.assertEqual(
+            preflight.headers["access-control-allow-origin"],
+            "http://127.0.0.1:4174",
+        )
+
+        invalid = await self.client.post(
+            "/v1/operational/days/2026-10-14/readings",
+            json={"unexpected": True},
+        )
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertEqual(invalid.json()["error"]["code"], "INVALID_BODY")
+
+        reading = self.operational_fixture.iloc[0].to_dict()
+        created = await self.client.post(
+            "/v1/operational/days/2026-10-14/readings",
+            json={"reading": reading},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(created.json()["source"], "manual")
+
+        filled = await self.client.post("/v1/operational/days/2026-10-14/fill")
+        self.assertEqual(filled.status_code, 200, filled.text)
+        self.assertEqual(filled.json()["progress"]["available"], 48)
+        self.assertEqual(filled.json()["progress"]["manual"], 1)
+
+        run = await self.client.post(
+            "/v1/operational/days/2026-10-14/run",
+            json={"humidity_scenario": "missing"},
+        )
+        self.assertEqual(run.status_code, 200, run.text)
+        self.assertEqual(run.json()["monitoring"]["recovery"]["status"], "active_estimated")
+        self.assertTrue(
+            all(row["physical_rh"] is None for row in run.json()["monitoring"]["sensor"]["values"])
+        )
 
     async def test_daily_api_returns_explicit_real_provenance(self):
         health = await self.client.get("/health")

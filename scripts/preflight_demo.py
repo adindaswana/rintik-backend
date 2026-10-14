@@ -2,10 +2,10 @@
 
 This script intentionally performs no inference and never mutates an existing
 runtime database.  It validates the frozen runtime, pinned dependencies,
-official daily fixtures, synthetic-demo provenance, and the SQLite schema that
-would be created for a new demo run.  With ``--api-url`` it also validates the
-live readiness response produced by the exact database supplied with
-``--database``.
+official daily fixtures, both synthetic-scenario provenances, and the SQLite
+schema that would be created for a new demo run. With ``--api-url`` it also
+validates the live readiness response produced by the exact database supplied
+with ``--database``.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 import inference as inf  # noqa: E402
 from daily_batch import DailyBatchService, FrozenRuntime  # noqa: E402
 from monitoring import MonitoringService, SYNTHETIC_FIXTURE_SHA256  # noqa: E402
+from operational_simulation import OperationalSimulationService  # noqa: E402
 
 
 REQUIRED_TABLES = {
@@ -48,6 +49,11 @@ REQUIRED_TABLES = {
     "sensor_incidents",
     "incident_actions",
     "recovery_estimates",
+    "operational_readings",
+    "operational_runs",
+    "operational_internal_predictions",
+    "operational_published_predictions",
+    "operational_humidity_sensor",
 }
 
 
@@ -118,6 +124,23 @@ def fixture_report(runtime: FrozenRuntime) -> dict[str, Any]:
         raise RuntimeError(
             "Synthetic fixture provenance must declare accuracy_ground_truth=false"
         )
+    operational_path = BACKEND_DIR / "fixtures" / "operational_2026_exogenous.csv"
+    operational_provenance_path = (
+        BACKEND_DIR / "fixtures" / "operational_2026_provenance.json"
+    )
+    operational_provenance = json.loads(
+        operational_provenance_path.read_text(encoding="utf-8")
+    )
+    operational_hash = sha256_file(operational_path)
+    if operational_provenance.get("csv_sha256") != operational_hash:
+        raise RuntimeError("Operational fixture/provenance hash mismatch")
+    if operational_provenance.get("contains_air_humidity") is not False:
+        raise RuntimeError("Operational fixture must declare contains_air_humidity=false")
+    if operational_provenance.get("field_measurement") is not False:
+        raise RuntimeError("Operational fixture must declare field_measurement=false")
+    if operational_provenance.get("row_count") != 576:
+        raise RuntimeError("Operational fixture provenance must declare 576 rows")
+
     return {
         "manifest": str(manifest_path),
         "dates": len(days),
@@ -127,6 +150,12 @@ def fixture_report(runtime: FrozenRuntime) -> dict[str, Any]:
         "synthetic_fixture_sha256": synthetic_hash,
         "synthetic_model_input": False,
         "synthetic_accuracy_ground_truth": False,
+        "operational_fixture": str(operational_path),
+        "operational_fixture_sha256": operational_hash,
+        "operational_rows": 576,
+        "operational_dates": 12,
+        "operational_contains_air_humidity": False,
+        "operational_field_measurement": False,
     }
 
 
@@ -189,6 +218,11 @@ def live_readiness(api_url: str) -> dict[str, Any]:
         raise RuntimeError(
             f"Live readiness mismatch: status={status}, fields={mismatches}"
         )
+    operational = body.get("operational_simulation", {})
+    if operational.get("mode") != "synthetic-operational-2026-v1":
+        raise RuntimeError("Live operational simulation mode is unavailable")
+    if operational.get("simulation") is not True:
+        raise RuntimeError("Live operational namespace must declare simulation=true")
     return {"url": url, "http_status": status, "body": body}
 
 
@@ -238,6 +272,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             / "synthetic_physical_humidity_SENSOR_SIMULATION.csv",
             PROTOTYPE_DIR / "demo" / "fixtures" / "SOURCE_PROVENANCE.json",
         )
+        operational = OperationalSimulationService(
+            runtime,
+            database_path,
+            BACKEND_DIR / "fixtures" / "operational_2026_exogenous.csv",
+            BACKEND_DIR / "fixtures" / "operational_2026_provenance.json",
+        )
         checks["database_schema"] = schema_report(database_path)
         checks["database_schema"]["temporary"] = temporary_database
         if args.api_url:
@@ -249,6 +289,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # never broaden deletion beyond this UUID-named preflight folder.
             if "monitoring" in locals():
                 del monitoring
+            if "operational" in locals():
+                del operational
             if "service" in locals():
                 del service
             gc.collect()

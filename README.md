@@ -111,6 +111,41 @@ stored separately as `source=model_estimate`; raw simulated sensor values are
 not overwritten. Thresholds and Model Health are illustrative operational
 heuristics, not calibrated accuracy evidence.
 
+## Isolated operational simulation (14-25 October 2026)
+
+The `/v1/operational` namespace supports the product's manual-reading workflow
+without weakening the hash-gated official replay. It uses a deterministic,
+documented synthetic exogenous fixture with 48 half-hour slots per date. The
+fixture contains no physical-humidity input and is labeled as simulation, not
+October 2026 field data or accuracy evidence.
+
+Typical flow:
+
+1. `GET /v1/operational/days` and select `next_expected_date`;
+2. `POST /v1/operational/days/{date}/readings` for each manual slot;
+3. explicitly call `POST /v1/operational/days/{date}/fill` to fill remaining
+   slots from the synthetic fixture while preserving manual rows;
+4. call `POST /v1/operational/days/{date}/run` only after all 48 slots exist;
+5. read `/result` and `/series`, or reset only this namespace with
+   `POST /v1/operational/reset` and the exact confirmation token.
+
+Manual duplicates are rejected unless the explicit `PUT` edit route is used.
+Runs remain chronological and archive `pred_internal` separately. The same
+frozen runtime and Post 1-3 implementation are reused, while operational state,
+provenance, published rows, and simulated humidity observations live in
+separate tables from the official 2023 demo. A missing-humidity scenario keeps
+the raw simulated sensor value null and stores the P3 substitute separately as
+`estimated` recovery.
+
+Regenerate and verify the fixture deterministically with:
+
+```powershell
+python scripts\build_operational_fixture.py
+```
+
+The committed CSV SHA256 is
+`d311ff980a0043b14311b6d7e20fc04ca69ef09c34127a6594bee3fa48953da6`.
+
 ## Environment overrides
 
 - `RINTIK_MODEL_PATH`
@@ -120,6 +155,8 @@ heuristics, not calibrated accuracy evidence.
 - `RINTIK_DATABASE_PATH`
 - `RINTIK_SYNTHETIC_FIXTURE_PATH`
 - `RINTIK_SYNTHETIC_PROVENANCE_PATH`
+- `RINTIK_OPERATIONAL_FIXTURE_PATH`
+- `RINTIK_OPERATIONAL_PROVENANCE_PATH`
 - `RINTIK_CORS_ORIGINS`
 
 ## Deployment status

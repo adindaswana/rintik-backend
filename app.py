@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, Response
 import inference as inf
 from daily_batch import BatchError, DailyBatchService, FrozenRuntime
 from monitoring import MonitoringService
+from operational_simulation import OperationalSimulationService
 from operator_api import OperatorDataService, feature_catalog
 
 LOGGER = logging.getLogger("rintik.backend")
@@ -54,17 +55,26 @@ SYNTHETIC_PROVENANCE_PATH = Path(os.environ.get(
     "RINTIK_SYNTHETIC_PROVENANCE_PATH",
     PROTOTYPE_DIR / "demo" / "fixtures" / "SOURCE_PROVENANCE.json",
 ))
+OPERATIONAL_FIXTURE_PATH = Path(os.environ.get(
+    "RINTIK_OPERATIONAL_FIXTURE_PATH",
+    BACKEND_DIR / "fixtures" / "operational_2026_exogenous.csv",
+))
+OPERATIONAL_PROVENANCE_PATH = Path(os.environ.get(
+    "RINTIK_OPERATIONAL_PROVENANCE_PATH",
+    BACKEND_DIR / "fixtures" / "operational_2026_provenance.json",
+))
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 1000
 
 SERVICE: DailyBatchService | None = None
 MONITORING: MonitoringService | None = None
+OPERATIONAL: OperationalSimulationService | None = None
 INITIALIZATION_ERROR: str | None = None
 MONITORING_INITIALIZATION_ERROR: str | None = None
 
 
 def initialize_service() -> DailyBatchService:
-    global SERVICE, MONITORING, INITIALIZATION_ERROR, MONITORING_INITIALIZATION_ERROR
+    global SERVICE, MONITORING, OPERATIONAL, INITIALIZATION_ERROR, MONITORING_INITIALIZATION_ERROR
     try:
         runtime = FrozenRuntime(
             MODEL_PATH,
@@ -94,6 +104,16 @@ def initialize_service() -> DailyBatchService:
             "Synthetic monitoring fixture failed integrity or startup checks."
         )
         LOGGER.exception("RINTIK synthetic monitoring initialization failed")
+    try:
+        OPERATIONAL = OperationalSimulationService(
+            SERVICE.runtime,
+            DATABASE_PATH,
+            OPERATIONAL_FIXTURE_PATH,
+            OPERATIONAL_PROVENANCE_PATH,
+        )
+    except Exception:
+        OPERATIONAL = None
+        LOGGER.exception("RINTIK operational simulation initialization failed")
     return SERVICE
 
 
@@ -120,7 +140,7 @@ allowed_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT"],
     allow_headers=["Content-Type", "Idempotency-Key"],
 )
 
@@ -151,6 +171,17 @@ def require_monitoring() -> MonitoringService:
             503,
         )
     return MONITORING
+
+
+def require_operational() -> OperationalSimulationService:
+    require_service()
+    if OPERATIONAL is None:
+        raise BatchError(
+            "OPERATIONAL_SIMULATION_UNAVAILABLE",
+            "The isolated operational simulation is unavailable; no fallback result was produced.",
+            503,
+        )
+    return OPERATIONAL
 
 
 async def request_json(request: Request) -> Any:
@@ -221,10 +252,80 @@ def health() -> JSONResponse:
         }
     )
     state = "ok" if MONITORING is not None else "degraded"
+    operational_status = (
+        OPERATIONAL.list_days()
+        if OPERATIONAL is not None
+        else {"mode": "synthetic-operational-2026-v1", "simulation": True, "ready": False}
+    )
     return JSONResponse(
         status_code=200,
-        content={"status": state, **SERVICE.status(), **monitoring_status},
+        content={"status": state, **SERVICE.status(), **monitoring_status, "operational_simulation": operational_status},
     )
+
+
+@app.get("/v1/operational/days")
+def list_operational_days() -> dict[str, Any]:
+    return require_operational().list_days()
+
+
+@app.get("/v1/operational/days/{requested_date}")
+def get_operational_day(requested_date: str) -> dict[str, Any]:
+    return require_operational().get_day(requested_date)
+
+
+@app.get("/v1/operational/days/{requested_date}/fixture")
+def get_operational_fixture_reading(requested_date: str, timestamp: str) -> dict[str, Any]:
+    return require_operational().get_fixture_reading(requested_date, timestamp)
+
+
+@app.post("/v1/operational/days/{requested_date}/readings")
+async def create_operational_reading(requested_date: str, request: Request) -> dict[str, Any]:
+    body = await request_json(request)
+    if not isinstance(body, dict) or set(body) != {"reading"}:
+        raise BatchError("INVALID_BODY", "Provide exactly one reading object.")
+    return await asyncio.to_thread(require_operational().save_manual, requested_date, body["reading"], False)
+
+
+@app.put("/v1/operational/days/{requested_date}/readings")
+async def update_operational_reading(requested_date: str, request: Request) -> dict[str, Any]:
+    body = await request_json(request)
+    if not isinstance(body, dict) or set(body) != {"reading"}:
+        raise BatchError("INVALID_BODY", "Provide exactly one reading object.")
+    return await asyncio.to_thread(require_operational().save_manual, requested_date, body["reading"], True)
+
+
+@app.post("/v1/operational/days/{requested_date}/fill")
+async def fill_operational_day(requested_date: str) -> dict[str, Any]:
+    return await asyncio.to_thread(require_operational().fill_missing, requested_date)
+
+
+@app.post("/v1/operational/days/{requested_date}/run")
+async def run_operational_day(requested_date: str, request: Request) -> dict[str, Any]:
+    body = await request_json(request)
+    if not isinstance(body, dict) or set(body) != {"humidity_scenario"}:
+        raise BatchError("INVALID_BODY", "Provide exactly one humidity_scenario.")
+    return await asyncio.to_thread(require_operational().run, requested_date, body["humidity_scenario"])
+
+
+@app.get("/v1/operational/days/{requested_date}/result")
+def get_operational_result(requested_date: str) -> dict[str, Any]:
+    return require_operational().get_result(requested_date)
+
+
+@app.get("/v1/operational/days/{requested_date}/series")
+def get_operational_series(requested_date: str) -> dict[str, Any]:
+    return require_operational().get_series(requested_date)
+
+
+@app.post("/v1/operational/reset")
+async def reset_operational_simulation(request: Request) -> dict[str, Any]:
+    body = await request_json(request)
+    if body != {"confirmation": "RESET_OPERATIONAL_SIMULATION"}:
+        raise BatchError(
+            "RESET_CONFIRMATION_REQUIRED",
+            "Operational reset requires RESET_OPERATIONAL_SIMULATION.",
+        )
+    return await asyncio.to_thread(require_operational().reset)
 
 
 @app.post("/v1/days/{requested_date}/ingest")

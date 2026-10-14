@@ -1,0 +1,19 @@
+{
+  "contains_air_humidity": false,
+  "csv_sha256": "d311ff980a0043b14311b6d7e20fc04ca69ef09c34127a6594bee3fa48953da6",
+  "field_measurement": false,
+  "field_validated_distribution": false,
+  "method": "bounded diurnal equations, daily weather offsets, correlated soil/irrigation dynamics, seeded Gaussian perturbations",
+  "model_input_only": true,
+  "period": {
+    "days": 12,
+    "end": "2026-10-25",
+    "slots_per_day": 48,
+    "start": "2026-10-14"
+  },
+  "row_count": 576,
+  "schema_version": "rintik-operational-simulation-v1",
+  "seed": 20261014,
+  "source": "deterministic_synthetic_exogenous_fixture",
+  "warning": "Synthetic operational scenario for demonstration; not October 2026 field measurements or accuracy evidence."
+}
