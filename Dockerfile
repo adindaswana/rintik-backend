@@ -16,7 +16,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     RINTIK_TEST_PATH=/home/user/assets/test.csv \
     RINTIK_SYNTHETIC_FIXTURE_PATH=/home/user/assets/synthetic_physical_humidity_SENSOR_SIMULATION.csv \
     RINTIK_SYNTHETIC_PROVENANCE_PATH=/home/user/assets/SOURCE_PROVENANCE.json \
-    RINTIK_DATABASE_PATH=/home/user/runtime/rintik.sqlite3
+    RINTIK_DATABASE_PATH=/home/user/runtime/rintik.sqlite3 \
+    RINTIK_LOW_MEMORY=1 \
+    RINTIK_ARTIFACT_CACHE_DIR=/home/user/runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/* \

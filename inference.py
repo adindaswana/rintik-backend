@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import pickle
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import torch
 import xgboost as xgb
 
 OFFICIAL_MODEL_SHA256 = "adce8fda2f465679ea6e8fe31124822a45a555b9dc154e12076ef5b6140699b0"
@@ -102,7 +105,12 @@ def load_frozen_artifact(
         )
     # torch.load uses pickle internally. It is permitted only after matching the
     # pinned hash of the trusted competition artifact.
-    artifact = torch.load(model_path, map_location="cpu")
+    if os.environ.get("RINTIK_LOW_MEMORY") == "1":
+        artifact = _load_artifact_without_resident_torch(model_path, actual)
+    else:
+        import torch
+
+        artifact = torch.load(model_path, map_location="cpu")
     required = {
         "artifact_version", "target", "stage1", "stage2",
         "feature_engineering", "reconstruction", "post_modelling",
@@ -111,6 +119,38 @@ def load_frozen_artifact(
     if missing:
         raise ArtifactIntegrityError(f"Checkpoint schema missing keys: {missing}")
     return artifact, actual
+
+
+def _load_artifact_without_resident_torch(model_path: Path, verified_sha256: str) -> dict[str, Any]:
+    """Hosting hemat memori (mis. Render 512 MB): torch dipakai sekali di proses anak.
+
+    Checkpoint hanya berisi tipe Python dan numpy, jadi isinya dapat dibawa ke proses
+    utama lewat pickle tanpa memuat torch (±150 MB) secara permanen. Hash checkpoint
+    sudah diverifikasi pemanggil; proses anak memverifikasinya ulang sebelum torch.load.
+    """
+    cache_dir = Path(os.environ.get("RINTIK_ARTIFACT_CACHE_DIR", model_path.parent))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"artifact_{verified_sha256}.pickle"
+    if not cache_path.is_file():
+        code = (
+            "import hashlib,pickle,sys,torch\n"
+            "src,dst,expected=sys.argv[1],sys.argv[2],sys.argv[3]\n"
+            "h=hashlib.sha256()\n"
+            "f=open(src,'rb')\n"
+            "[h.update(b) for b in iter(lambda:f.read(1<<20),b'')]\n"
+            "f.close()\n"
+            "assert h.hexdigest()==expected,'checkpoint hash mismatch'\n"
+            "a=torch.load(src,map_location='cpu')\n"
+            "tmp=dst+'.tmp'\n"
+            "pickle.dump(a,open(tmp,'wb'),protocol=pickle.HIGHEST_PROTOCOL)\n"
+            "import os; os.replace(tmp,dst)\n"
+        )
+        subprocess.run(
+            [sys.executable, "-c", code, str(model_path), str(cache_path), verified_sha256],
+            check=True,
+        )
+    with open(cache_path, "rb") as handle:
+        return pickle.load(handle)
 
 
 def load_state_sidecar(
