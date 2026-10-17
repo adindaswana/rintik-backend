@@ -159,6 +159,16 @@ The committed CSV SHA256 is
 - `RINTIK_OPERATIONAL_PROVENANCE_PATH`
 - `RINTIK_CORS_ORIGINS`
 
+## Pemeriksaan Sensor (`POST /monitor`)
+
+Endpoint stateless dari fitur Periksa Sensor (aturan `demo-v1` di `sensor_check.py`, ambang
+`illustrative_unvalidated`). Masukan sama seperti `/predict` ditambah kolom `air_humidity`
+(bacaan sensor unggahan, dibuang sebelum inferensi). Estimasi berasal dari runtime beku yang
+sama; unggahan sebelum konteks beku ditolak dengan `MONITOR_INPUT_OUT_OF_RANGE`, dan bila model
+tidak tersedia respons 503 tanpa fallback. Hasil tidak diarsipkan dan bacaan sensor unggahan bukan
+ground truth. Ini terpisah dari monitoring simulasi berarsip `/v1/demo/*` (sinyal konflik pada
+fixture sintetis); keduanya sama-sama ilustratif dan tidak boleh dibaca sebagai akurasi.
+
 ## Deployment status
 
 Remote deployment remains intentionally disabled through Milestone 5. `render.yaml` declares no services. The Docker image requires the checkpoint plus official train/test files to be mounted read-only at `/official` and a writable `/runtime`; it does not download remote artifacts. No push or deployment has been performed.

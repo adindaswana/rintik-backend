@@ -6,17 +6,20 @@ import asyncio
 import io
 import json
 import logging
+import math
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 import inference as inf
+import sensor_check
 from daily_batch import BatchError, DailyBatchService, FrozenRuntime
 from monitoring import MonitoringService
 from operational_simulation import OperationalSimulationService
@@ -547,5 +550,91 @@ async def predict_full_submission(request: Request) -> dict[str, Any]:
             "mean": round(float(values.mean()), 2),
             "min": round(float(values.min()), 2),
             "max": round(float(values.max()), 2),
+        },
+    }
+
+
+@app.post("/monitor")
+async def monitor_uploaded_sensor(request: Request) -> dict[str, Any]:
+    """Pemeriksaan Sensor (stateless): bandingkan air_humidity unggahan dengan estimasi model.
+
+    Estimasi dibuat dari runtime beku yang sama dengan /predict; kolom air_humidity
+    dibuang sebelum inferensi. Aturan demo-v1 belum dikalibrasi, hasilnya tidak
+    diarsipkan, dan bacaan sensor unggahan bukan ground truth. Sinyal ini terpisah
+    dari monitoring simulasi berarsip di /v1/demo/*.
+    """
+    service = require_service()
+    body = await request_json(request)
+    frame = frame_from_body(body)
+    comparator = body.get("comparator") or "p3"
+    if comparator not in sensor_check.RULES["center"]:
+        raise BatchError("INVALID_COMPARATOR", "comparator must be p3 or inti.")
+    center = sensor_check.RULES["center"][comparator]
+    if body.get("center") is not None:
+        try:
+            center = float(body["center"])
+        except (TypeError, ValueError) as exc:
+            raise BatchError("INVALID_CENTER", "center must be a number.") from exc
+        if not math.isfinite(center):
+            raise BatchError("INVALID_CENTER", "center must be a finite number.")
+    sensor, message = sensor_check.parse_sensor(frame)
+    if message:
+        raise BatchError("INVALID_SENSOR_READINGS", message)
+    try:
+        features = frame.drop(columns=[sensor_check.SENSOR_COL])
+        normalized = inf.canonical_input_frame(features)
+    except (TypeError, ValueError) as exc:
+        raise BatchError("INVALID_INPUT", str(exc)) from exc
+    if normalized["datetime"].duplicated().any():
+        raise BatchError("DUPLICATE_TIMESTAMP", "Each timestamp may appear only once.")
+    sensor_by_time = pd.Series(
+        sensor.to_numpy(),
+        index=pd.to_datetime(frame["datetime"], errors="coerce"),
+    )
+
+    def run_estimate() -> tuple[pd.DataFrame, dict[str, Any]]:
+        internal = service.runtime.predict_internal(normalized)
+        return internal, service.runtime.postprocess(internal)
+
+    try:
+        internal, post = await asyncio.to_thread(run_estimate)
+    except ValueError as exc:
+        raise BatchError("MONITOR_INPUT_OUT_OF_RANGE", str(exc)) from exc
+    inti = internal["pred_internal"].to_numpy()
+    p3 = np.asarray(post["post_3"], dtype=float)
+    observed = sensor_by_time.reindex(pd.to_datetime(internal["datetime"])).to_numpy()
+    reference = p3 if comparator == "p3" else inti
+    days = sensor_check.evaluate_days(internal["datetime"], observed, reference, center)
+    summary = {status: 0 for status in sensor_check.STATUSES}
+    for day in days:
+        summary[day["status"]] += 1
+    stamps = pd.to_datetime(internal["datetime"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+    predictions = [
+        {
+            "datetime": stamp,
+            "sensor": sensor_check._rnd(reading, 4),
+            "p3": round(float(final), 4),
+            "inti": round(float(core), 4),
+        }
+        for stamp, reading, final, core in zip(stamps, observed, p3, inti)
+    ]
+    return {
+        "count": len(predictions),
+        "comparator": comparator,
+        "rule_version": sensor_check.RULES["version"],
+        "center": center,
+        "predictions": predictions,
+        "days": days,
+        "summary": summary,
+        "rules": sensor_check.RULES,
+        "provenance": {
+            "source": "real_original_pth",
+            "simulation": False,
+            "model_sha256": service.runtime.model_sha256,
+            "state_sha256": service.runtime.state_sha256,
+            "pipeline_version": inf.PIPELINE_VERSION,
+            "thresholds": "illustrative_unvalidated",
+            "sensor_reading_role": "user_uploaded_comparator_not_ground_truth",
+            "archived": False,
         },
     }
