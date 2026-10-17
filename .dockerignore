@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
 .git/
+.venv/
+runtime/
+tests/
+docs/
 artifact_model.pkl
 README_DEPLOY.md
