@@ -146,6 +146,32 @@ python scripts\build_operational_fixture.py
 The committed CSV SHA256 is
 `d311ff980a0043b14311b6d7e20fc04ca69ef09c34127a6594bee3fa48953da6`.
 
+## Visitor sessions (state isolation)
+
+Every stateful route (`/health`, `/v1/days*`, `/v1/demo*`, `/v1/operational*`,
+series and export) accepts `X-Rintik-Session: <id>` where the id is 16-64
+characters of `A-Z a-z 0-9 _ -`. Each session gets its own SQLite file in
+`RINTIK_SESSION_DIR` (default: `<dir of RINTIK_DATABASE_PATH>/sessions/`,
+named by the SHA-256 of the id), so one visitor can neither read nor reset
+another visitor's replay, monitoring, recovery or operational readings. Both
+reset routes clear only the caller's session. The frozen runtime and pinned
+fixtures are loaded once and shared; no inference code path changes.
+
+- No header: the legacy shared `default` database (local launcher, tests, QA).
+- Invalid header: HTTP 400 `{"error":{"code":"INVALID_SESSION",...}}`.
+- `/health` adds `"session":{"id_hash":"<first 8 hex of sha256(id)>","scoped":true}`
+  (`id_hash=null, scoped=false` for `default`); the raw id is never echoed.
+- At most `RINTIK_MAX_SESSIONS` (default 64) session databases are kept; the
+  least recently used idle one is deleted when a new session is created.
+- `/predict`, `/monitor` and `/v1/features` are stateless and ignore the header.
+
+A session id is a bearer capability for demo state, not authentication.
+
+Monitoring responses also carry `recovery.explanation` (`code`, ordered
+`next_steps`, `blocking_reasons`, `demo_override_would_allow`,
+`estimate_available`, `raw_physical_overwritten=false`, `confirm_endpoint`) so a
+client can explain why recovery is restricted without re-implementing the gate.
+
 ## Environment overrides
 
 - `RINTIK_MODEL_PATH`
@@ -153,6 +179,8 @@ The committed CSV SHA256 is
 - `RINTIK_TRAIN_PATH`
 - `RINTIK_TEST_PATH`
 - `RINTIK_DATABASE_PATH`
+- `RINTIK_SESSION_DIR`
+- `RINTIK_MAX_SESSIONS`
 - `RINTIK_SYNTHETIC_FIXTURE_PATH`
 - `RINTIK_SYNTHETIC_PROVENANCE_PATH`
 - `RINTIK_OPERATIONAL_FIXTURE_PATH`

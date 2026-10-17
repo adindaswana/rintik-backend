@@ -8,6 +8,7 @@ never passed into the model.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -61,6 +62,13 @@ class OperationalSimulationService:
         self.fixture = self._load_fixture()
         self.fixture_sha256 = inf.sha256_file(self.fixture_path)
         self._initialize_database()
+
+    def with_database(self, database_path: str | Path) -> "OperationalSimulationService":
+        """Same validated fixture, separate persistence (one visitor session)."""
+        clone = copy.copy(self)
+        clone.database_path = Path(database_path)
+        clone._initialize_database()
+        return clone
 
     def _connect(self):
         import sqlite3

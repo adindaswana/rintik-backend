@@ -8,13 +8,14 @@ import json
 import logging
 import math
 import os
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -24,6 +25,13 @@ from daily_batch import BatchError, DailyBatchService, FrozenRuntime
 from monitoring import MonitoringService
 from operational_simulation import OperationalSimulationService
 from operator_api import OperatorDataService, feature_catalog
+from sessions import (
+    SESSION_HEADER,
+    Session,
+    SessionRegistry,
+    parse_session_header,
+    session_digest,
+)
 
 LOGGER = logging.getLogger("rintik.backend")
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -66,6 +74,11 @@ OPERATIONAL_PROVENANCE_PATH = Path(os.environ.get(
     "RINTIK_OPERATIONAL_PROVENANCE_PATH",
     BACKEND_DIR / "fixtures" / "operational_2026_provenance.json",
 ))
+SESSION_DIR = Path(os.environ.get(
+    "RINTIK_SESSION_DIR",
+    DATABASE_PATH.parent / "sessions",
+))
+MAX_SESSIONS = int(os.environ.get("RINTIK_MAX_SESSIONS", "64"))
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 1000
 
@@ -74,6 +87,8 @@ MONITORING: MonitoringService | None = None
 OPERATIONAL: OperationalSimulationService | None = None
 INITIALIZATION_ERROR: str | None = None
 MONITORING_INITIALIZATION_ERROR: str | None = None
+# Visitor sessions: one SQLite file each, sharing the single frozen runtime.
+SESSIONS = SessionRegistry(SESSION_DIR, MAX_SESSIONS)
 
 
 def initialize_service() -> DailyBatchService:
@@ -144,7 +159,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_methods=["GET", "POST", "PUT"],
-    allow_headers=["Content-Type", "Idempotency-Key"],
+    allow_headers=["Content-Type", "Idempotency-Key", SESSION_HEADER],
 )
 
 
@@ -165,26 +180,42 @@ def require_service() -> DailyBatchService:
     return SERVICE
 
 
-def require_monitoring() -> MonitoringService:
-    require_service()
-    if MONITORING is None:
+def default_session() -> Session:
+    """Legacy shared state, used when a request carries no session header."""
+    return Session(
+        scoped=False,
+        id_hash=None,
+        daily=require_service(),
+        monitoring=MONITORING,
+        operational=OPERATIONAL,
+    )
+
+
+def current_session(request: Request) -> Iterator[Session]:
+    """Resolve X-Rintik-Session (absent => default); invalid => HTTP 400."""
+    session_id = parse_session_header(request.headers.get(SESSION_HEADER))
+    with SESSIONS.use(session_id, default_session()) as session:
+        yield session
+
+
+def require_monitoring(session: Session) -> MonitoringService:
+    if session.monitoring is None:
         raise BatchError(
             "MONITORING_UNAVAILABLE",
             "Synthetic demo monitoring is unavailable; real model results were not replaced.",
             503,
         )
-    return MONITORING
+    return session.monitoring
 
 
-def require_operational() -> OperationalSimulationService:
-    require_service()
-    if OPERATIONAL is None:
+def require_operational(session: Session) -> OperationalSimulationService:
+    if session.operational is None:
         raise BatchError(
             "OPERATIONAL_SIMULATION_UNAVAILABLE",
             "The isolated operational simulation is unavailable; no fallback result was produced.",
             503,
         )
-    return OPERATIONAL
+    return session.operational
 
 
 async def request_json(request: Request) -> Any:
@@ -232,7 +263,12 @@ async def handle_batch_error(_: Request, exc: BatchError) -> JSONResponse:
 
 
 @app.get("/health")
-def health() -> JSONResponse:
+def health(request: Request) -> JSONResponse:
+    session_id = parse_session_header(request.headers.get(SESSION_HEADER))
+    session_info = {
+        "id_hash": session_digest(session_id)[:8] if session_id else None,
+        "scoped": session_id is not None,
+    }
     if SERVICE is None:
         return JSONResponse(
             status_code=503,
@@ -242,98 +278,107 @@ def health() -> JSONResponse:
                 "source": None,
                 "simulation": False,
                 "error": INITIALIZATION_ERROR or "Runtime has not initialized.",
+                "session": session_info,
             },
         )
-    monitoring_status = (
-        MONITORING.status()
-        if MONITORING is not None
-        else {
-            "monitoring_ready": False,
-            "monitoring_mode": "synthetic_demo",
-            "monitoring_simulation": True,
-            "monitoring_error": MONITORING_INITIALIZATION_ERROR,
-        }
-    )
-    state = "ok" if MONITORING is not None else "degraded"
-    operational_status = (
-        OPERATIONAL.list_days()
-        if OPERATIONAL is not None
-        else {"mode": "synthetic-operational-2026-v1", "simulation": True, "ready": False}
-    )
-    return JSONResponse(
-        status_code=200,
-        content={"status": state, **SERVICE.status(), **monitoring_status, "operational_simulation": operational_status},
-    )
+    with SESSIONS.use(session_id, default_session()) as session:
+        monitoring_status = (
+            session.monitoring.status()
+            if session.monitoring is not None
+            else {
+                "monitoring_ready": False,
+                "monitoring_mode": "synthetic_demo",
+                "monitoring_simulation": True,
+                "monitoring_error": MONITORING_INITIALIZATION_ERROR
+                or "Synthetic monitoring is unavailable for this session.",
+            }
+        )
+        state = "ok" if session.monitoring is not None else "degraded"
+        operational_status = (
+            session.operational.list_days()
+            if session.operational is not None
+            else {"mode": "synthetic-operational-2026-v1", "simulation": True, "ready": False}
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": state,
+                **session.daily.status(),
+                **monitoring_status,
+                "operational_simulation": operational_status,
+                "session": session.describe(),
+            },
+        )
 
 
 @app.get("/v1/operational/days")
-def list_operational_days() -> dict[str, Any]:
-    return require_operational().list_days()
+def list_operational_days(session: Session = Depends(current_session)) -> dict[str, Any]:
+    return require_operational(session).list_days()
 
 
 @app.get("/v1/operational/days/{requested_date}")
-def get_operational_day(requested_date: str) -> dict[str, Any]:
-    return require_operational().get_day(requested_date)
+def get_operational_day(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    return require_operational(session).get_day(requested_date)
 
 
 @app.get("/v1/operational/days/{requested_date}/fixture")
-def get_operational_fixture_reading(requested_date: str, timestamp: str) -> dict[str, Any]:
-    return require_operational().get_fixture_reading(requested_date, timestamp)
+def get_operational_fixture_reading(requested_date: str, timestamp: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    return require_operational(session).get_fixture_reading(requested_date, timestamp)
 
 
 @app.post("/v1/operational/days/{requested_date}/readings")
-async def create_operational_reading(requested_date: str, request: Request) -> dict[str, Any]:
+async def create_operational_reading(requested_date: str, request: Request, session: Session = Depends(current_session)) -> dict[str, Any]:
     body = await request_json(request)
     if not isinstance(body, dict) or set(body) != {"reading"}:
         raise BatchError("INVALID_BODY", "Provide exactly one reading object.")
-    return await asyncio.to_thread(require_operational().save_manual, requested_date, body["reading"], False)
+    return await asyncio.to_thread(require_operational(session).save_manual, requested_date, body["reading"], False)
 
 
 @app.put("/v1/operational/days/{requested_date}/readings")
-async def update_operational_reading(requested_date: str, request: Request) -> dict[str, Any]:
+async def update_operational_reading(requested_date: str, request: Request, session: Session = Depends(current_session)) -> dict[str, Any]:
     body = await request_json(request)
     if not isinstance(body, dict) or set(body) != {"reading"}:
         raise BatchError("INVALID_BODY", "Provide exactly one reading object.")
-    return await asyncio.to_thread(require_operational().save_manual, requested_date, body["reading"], True)
+    return await asyncio.to_thread(require_operational(session).save_manual, requested_date, body["reading"], True)
 
 
 @app.post("/v1/operational/days/{requested_date}/fill")
-async def fill_operational_day(requested_date: str) -> dict[str, Any]:
-    return await asyncio.to_thread(require_operational().fill_missing, requested_date)
+async def fill_operational_day(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    return await asyncio.to_thread(require_operational(session).fill_missing, requested_date)
 
 
 @app.post("/v1/operational/days/{requested_date}/run")
-async def run_operational_day(requested_date: str, request: Request) -> dict[str, Any]:
+async def run_operational_day(requested_date: str, request: Request, session: Session = Depends(current_session)) -> dict[str, Any]:
     body = await request_json(request)
     if not isinstance(body, dict) or set(body) != {"humidity_scenario"}:
         raise BatchError("INVALID_BODY", "Provide exactly one humidity_scenario.")
-    return await asyncio.to_thread(require_operational().run, requested_date, body["humidity_scenario"])
+    return await asyncio.to_thread(require_operational(session).run, requested_date, body["humidity_scenario"])
 
 
 @app.get("/v1/operational/days/{requested_date}/result")
-def get_operational_result(requested_date: str) -> dict[str, Any]:
-    return require_operational().get_result(requested_date)
+def get_operational_result(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    return require_operational(session).get_result(requested_date)
 
 
 @app.get("/v1/operational/days/{requested_date}/series")
-def get_operational_series(requested_date: str) -> dict[str, Any]:
-    return require_operational().get_series(requested_date)
+def get_operational_series(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    return require_operational(session).get_series(requested_date)
 
 
 @app.post("/v1/operational/reset")
-async def reset_operational_simulation(request: Request) -> dict[str, Any]:
+async def reset_operational_simulation(request: Request, session: Session = Depends(current_session)) -> dict[str, Any]:
     body = await request_json(request)
     if body != {"confirmation": "RESET_OPERATIONAL_SIMULATION"}:
         raise BatchError(
             "RESET_CONFIRMATION_REQUIRED",
             "Operational reset requires RESET_OPERATIONAL_SIMULATION.",
         )
-    return await asyncio.to_thread(require_operational().reset)
+    return await asyncio.to_thread(require_operational(session).reset)
 
 
 @app.post("/v1/days/{requested_date}/ingest")
-async def ingest_day(requested_date: str, request: Request) -> dict[str, Any]:
-    service = require_service()
+async def ingest_day(requested_date: str, request: Request, session: Session = Depends(current_session)) -> dict[str, Any]:
+    service = session.daily
     body = await request_json(request)
     frame = frame_from_body(body)
     idempotency_key = request.headers.get("idempotency-key")
@@ -343,21 +388,21 @@ async def ingest_day(requested_date: str, request: Request) -> dict[str, Any]:
 
 
 @app.post("/v1/days/{requested_date}/run")
-async def run_day(requested_date: str) -> dict[str, Any]:
-    service = require_service()
+async def run_day(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    service = session.daily
     return await asyncio.to_thread(service.run, requested_date)
 
 
 @app.get("/v1/days")
-def list_days() -> dict[str, Any]:
-    service = require_service()
+def list_days(session: Session = Depends(current_session)) -> dict[str, Any]:
+    service = session.daily
     return {"days": service.list_days(), "runtime": service.status()}
 
 
 @app.get("/v1/demo/official-input/next")
-def next_official_demo_input() -> dict[str, Any]:
+def next_official_demo_input(session: Session = Depends(current_session)) -> dict[str, Any]:
     """Return the next pinned official day as input, never as a prediction."""
-    service = require_service()
+    service = session.daily
     next_date = service.status()["next_expected_date"]
     if next_date is None:
         raise BatchError(
@@ -405,9 +450,9 @@ def next_official_demo_input() -> dict[str, Any]:
 
 
 @app.post("/v1/demo/reset")
-async def reset_demo_state(request: Request) -> dict[str, Any]:
+async def reset_demo_state(request: Request, session: Session = Depends(current_session)) -> dict[str, Any]:
     """Explicitly reset local demo persistence; immutable artifacts are untouched."""
-    monitoring = require_monitoring()
+    monitoring = require_monitoring(session)
     body = await request_json(request)
     if body != {"confirmation": "RESET_DEMO_STATE"}:
         raise BatchError(
@@ -418,8 +463,8 @@ async def reset_demo_state(request: Request) -> dict[str, Any]:
 
 
 @app.get("/v1/days/{requested_date}/result")
-def day_result(requested_date: str) -> dict[str, Any]:
-    service = require_service()
+def day_result(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    service = session.daily
     return service.get_result(requested_date)
 
 
@@ -430,14 +475,14 @@ def list_features() -> dict[str, Any]:
 
 
 @app.get("/v1/days/{requested_date}/series")
-def day_sensor_series(requested_date: str) -> dict[str, Any]:
-    service = require_service()
+def day_sensor_series(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    service = session.daily
     return OperatorDataService(service).get_series(requested_date)
 
 
 @app.get("/v1/days/{requested_date}/export.csv")
-def export_day(requested_date: str) -> Response:
-    service = require_service()
+def export_day(requested_date: str, session: Session = Depends(current_session)) -> Response:
+    service = session.daily
     csv_text = OperatorDataService(service).export_day_csv(requested_date)
     return Response(
         content=csv_text,
@@ -450,26 +495,26 @@ def export_day(requested_date: str) -> Response:
 
 
 @app.post("/v1/demo/days/{requested_date}/monitor")
-async def monitor_day(requested_date: str) -> dict[str, Any]:
-    monitoring = require_monitoring()
+async def monitor_day(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    monitoring = require_monitoring(session)
     return await asyncio.to_thread(monitoring.monitor_day, requested_date)
 
 
 @app.get("/v1/demo/days/{requested_date}/monitoring")
-def monitoring_result(requested_date: str) -> dict[str, Any]:
-    monitoring = require_monitoring()
+def monitoring_result(requested_date: str, session: Session = Depends(current_session)) -> dict[str, Any]:
+    monitoring = require_monitoring(session)
     return monitoring.get_monitoring(requested_date)
 
 
 @app.get("/v1/demo/incidents")
-def list_demo_incidents() -> dict[str, Any]:
-    monitoring = require_monitoring()
+def list_demo_incidents(session: Session = Depends(current_session)) -> dict[str, Any]:
+    monitoring = require_monitoring(session)
     return {"mode": "synthetic_demo", "simulation": True, "incidents": monitoring.list_incidents()}
 
 
 @app.post("/v1/demo/audits")
-async def create_demo_audit(request: Request) -> dict[str, Any]:
-    monitoring = require_monitoring()
+async def create_demo_audit(request: Request, session: Session = Depends(current_session)) -> dict[str, Any]:
+    monitoring = require_monitoring(session)
     body = await request_json(request)
     if not isinstance(body, dict) or set(body) != {"scenario"}:
         raise BatchError("INVALID_BODY", "Provide exactly one demo audit scenario.")
@@ -481,14 +526,14 @@ async def create_demo_audit(request: Request) -> dict[str, Any]:
 
 
 @app.get("/v1/demo/audits/current")
-def current_demo_audit() -> dict[str, Any]:
-    monitoring = require_monitoring()
+def current_demo_audit(session: Session = Depends(current_session)) -> dict[str, Any]:
+    monitoring = require_monitoring(session)
     return monitoring.get_current_audit()
 
 
 @app.post("/v1/demo/incidents/{incident_id}/confirm")
-async def confirm_demo_incident(incident_id: str, request: Request) -> dict[str, Any]:
-    monitoring = require_monitoring()
+async def confirm_demo_incident(incident_id: str, request: Request, session: Session = Depends(current_session)) -> dict[str, Any]:
+    monitoring = require_monitoring(session)
     body = await request_json(request)
     if not isinstance(body, dict) or set(body) - {"demo_override", "note"}:
         raise BatchError(

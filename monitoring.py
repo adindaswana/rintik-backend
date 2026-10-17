@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -97,6 +98,67 @@ def evaluate_recovery_gate(
     }
 
 
+AUDIT_BLOCKING_REASONS = {
+    "accuracy_audit_failed",
+    "accuracy_audit_expired",
+    "accuracy_not_yet_verified",
+}
+
+
+def explain_recovery(
+    health: dict[str, Any],
+    audit: dict[str, Any],
+    incident: dict[str, Any] | None,
+    demo_override_applied: bool,
+    recovery_status: str,
+    estimate_available: bool,
+) -> dict[str, Any]:
+    """Describe the recovery state for the UI without changing the gate policy.
+
+    ``next_steps`` lists machine-readable actions in order; an empty list means
+    no user action is needed or possible in the demo.
+    """
+    with_override = evaluate_recovery_gate(health, audit, True)
+    blocking = [
+        reason for reason in with_override["reasons"]
+        if reason != "independent_audit_or_explicit_demo_override_required"
+    ]
+    audit_blocking = [reason for reason in blocking if reason in AUDIT_BLOCKING_REASONS]
+    health_blocking = [reason for reason in blocking if reason not in AUDIT_BLOCKING_REASONS]
+    next_steps: list[str] = []
+    if incident is None:
+        code = "no_sensor_incident"
+    elif recovery_status == "active_estimated":
+        code = "recovery_active_estimated"
+    else:
+        if health_blocking:
+            code = "blocked_by_operational_health"
+            next_steps.append("wait_for_healthy_pipeline")
+        elif audit_blocking:
+            code = "blocked_by_accuracy_audit"
+            next_steps.append("record_passing_demo_audit")
+            if not demo_override_applied:
+                next_steps.append("confirm_incident_with_demo_override")
+        elif incident["status"] == "suspected":
+            code = "awaiting_incident_confirmation"
+            next_steps.append("confirm_incident_with_demo_override")
+        else:
+            code = "confirmed_without_demo_override"
+            next_steps.append("confirm_incident_with_demo_override")
+    return {
+        "code": code,
+        "next_steps": next_steps,
+        "blocking_reasons": blocking,
+        "demo_override_would_allow": bool(with_override["allowed"]),
+        "estimate_available": bool(estimate_available),
+        "estimate_source": "rintik_post_3" if estimate_available else None,
+        "raw_physical_overwritten": False,
+        "confirm_endpoint": (
+            f"/v1/demo/incidents/{incident['incident_id']}/confirm" if incident else None
+        ),
+    }
+
+
 class MonitoringService:
     def __init__(
         self,
@@ -120,6 +182,13 @@ class MonitoringService:
 
     def _connect(self) -> sqlite3.Connection:
         return self.daily._connect()
+
+    def for_daily(self, daily: DailyBatchService) -> "MonitoringService":
+        """Same validated fixture, separate persistence (one visitor session)."""
+        clone = copy.copy(self)
+        clone.daily = daily
+        clone._initialize_database()
+        return clone
 
     def _validate_provenance(self) -> None:
         if self.provenance.get("synthetic_sensor_file_sha256") != self.fixture_sha256:
@@ -831,6 +900,14 @@ class MonitoringService:
                     "status": recovery_status,
                     "source": "model_estimate" if recovery_rows else None,
                     "values": [dict(row) for row in recovery_rows],
+                    "explanation": explain_recovery(
+                        health,
+                        audit,
+                        incident,
+                        demo_override_applied,
+                        recovery_status,
+                        bool(predictions),
+                    ),
                 },
             }
 
