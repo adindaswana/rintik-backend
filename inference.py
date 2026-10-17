@@ -14,8 +14,6 @@ import hashlib
 import json
 import os
 import pickle
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -121,36 +119,39 @@ def load_frozen_artifact(
     return artifact, actual
 
 
-def _load_artifact_without_resident_torch(model_path: Path, verified_sha256: str) -> dict[str, Any]:
-    """Hosting hemat memori (mis. Render 512 MB): torch dipakai sekali di proses anak.
+_SAFE_PICKLE_MODULES = ("builtins", "__builtin__", "numpy", "collections", "_codecs", "copyreg")
 
-    Checkpoint hanya berisi tipe Python dan numpy, jadi isinya dapat dibawa ke proses
-    utama lewat pickle tanpa memuat torch (±150 MB) secara permanen. Hash checkpoint
-    sudah diverifikasi pemanggil; proses anak memverifikasinya ulang sebelum torch.load.
+
+class _CheckpointUnpickler(pickle.Unpickler):
+    """Hanya tipe Python dasar dan numpy; checkpoint resmi tidak berisi tensor."""
+
+    def persistent_load(self, pid):  # tensor storage -> bukan checkpoint yang diharapkan
+        raise ArtifactIntegrityError("Checkpoint unexpectedly contains tensor storage")
+
+    def find_class(self, module, name):
+        if module.split(".")[0] not in _SAFE_PICKLE_MODULES:
+            raise ArtifactIntegrityError(f"Checkpoint references disallowed class {module}.{name}")
+        return super().find_class(module, name)
+
+
+def _load_artifact_without_resident_torch(model_path: Path, verified_sha256: str) -> dict[str, Any]:
+    """Hosting hemat memori (mis. Render 512 MB): buka checkpoint tanpa memuat torch.
+
+    File .pth buatan torch.save adalah arsip zip berisi data.pkl. Checkpoint RINTIK hanya
+    berisi tipe Python dan numpy (tanpa tensor), sehingga isinya identik dengan torch.load
+    (diverifikasi). Hash SHA256 checkpoint sudah dicek pemanggil sebelum fungsi ini.
     """
-    cache_dir = Path(os.environ.get("RINTIK_ARTIFACT_CACHE_DIR", model_path.parent))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"artifact_{verified_sha256}.pickle"
-    if not cache_path.is_file():
-        code = (
-            "import hashlib,pickle,sys,torch\n"
-            "src,dst,expected=sys.argv[1],sys.argv[2],sys.argv[3]\n"
-            "h=hashlib.sha256()\n"
-            "f=open(src,'rb')\n"
-            "[h.update(b) for b in iter(lambda:f.read(1<<20),b'')]\n"
-            "f.close()\n"
-            "assert h.hexdigest()==expected,'checkpoint hash mismatch'\n"
-            "a=torch.load(src,map_location='cpu')\n"
-            "tmp=dst+'.tmp'\n"
-            "pickle.dump(a,open(tmp,'wb'),protocol=pickle.HIGHEST_PROTOCOL)\n"
-            "import os; os.replace(tmp,dst)\n"
-        )
-        subprocess.run(
-            [sys.executable, "-c", code, str(model_path), str(cache_path), verified_sha256],
-            check=True,
-        )
-    with open(cache_path, "rb") as handle:
-        return pickle.load(handle)
+    import zipfile
+
+    with zipfile.ZipFile(model_path) as archive:
+        names = [n for n in archive.namelist() if n.endswith("/data.pkl") or n == "data.pkl"]
+        if len(names) != 1:
+            raise ArtifactIntegrityError("Checkpoint archive must contain exactly one data.pkl")
+        with archive.open(names[0]) as handle:
+            artifact = _CheckpointUnpickler(handle).load()
+    if not isinstance(artifact, dict):
+        raise ArtifactIntegrityError("Checkpoint payload must be a dict")
+    return artifact
 
 
 def load_state_sidecar(

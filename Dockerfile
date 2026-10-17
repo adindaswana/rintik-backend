@@ -17,8 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     RINTIK_SYNTHETIC_FIXTURE_PATH=/home/user/assets/synthetic_physical_humidity_SENSOR_SIMULATION.csv \
     RINTIK_SYNTHETIC_PROVENANCE_PATH=/home/user/assets/SOURCE_PROVENANCE.json \
     RINTIK_DATABASE_PATH=/home/user/runtime/rintik.sqlite3 \
-    RINTIK_LOW_MEMORY=1 \
-    RINTIK_ARTIFACT_CACHE_DIR=/home/user/runtime
+    RINTIK_LOW_MEMORY=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
@@ -26,9 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
 
 WORKDIR /home/user/app
 COPY requirements.txt .
-# torch versi CPU (jauh lebih kecil dari wheel CUDA); 2.2.1+cpu memenuhi pin torch==2.2.1.
-RUN pip install --no-cache-dir torch==2.2.1 --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir -r requirements.txt huggingface_hub==0.26.2
+# Server memakai RINTIK_LOW_MEMORY=1 (checkpoint dibuka tanpa torch), jadi torch tidak dipasang.
+RUN grep -v '^torch' requirements.txt > /tmp/requirements-server.txt \
+    && pip install --no-cache-dir -r /tmp/requirements-server.txt huggingface_hub==0.26.2
 
 COPY --chown=user . .
 RUN chmod +x start.sh
