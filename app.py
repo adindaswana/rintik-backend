@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 import inference as inf
+import model_audit
 import sensor_check
 from daily_batch import BatchError, DailyBatchService, FrozenRuntime
 from monitoring import MonitoringService
@@ -599,6 +600,45 @@ async def predict_full_submission(request: Request) -> dict[str, Any]:
             "max": round(float(values.max()), 2),
         },
     }
+
+
+_AUDIT_RULES: dict[str, Any] | None = None
+
+
+def audit_rules() -> dict[str, Any]:
+    """Demo model-health/audit rules; independent of the frozen model runtime."""
+    global _AUDIT_RULES
+    if _AUDIT_RULES is None:
+        try:
+            _AUDIT_RULES = model_audit.load_rules()
+        except Exception as exc:
+            LOGGER.exception("Audit rules failed to load")
+            raise BatchError("AUDIT_RULES_UNAVAILABLE", "Audit rules or the training baseline failed integrity checks.", 503) from exc
+    return _AUDIT_RULES
+
+
+@app.get("/v1/audit/rules")
+def get_audit_rules() -> dict[str, Any]:
+    return model_audit.public_rules(audit_rules())
+
+
+@app.post("/v1/audit/model-health")
+async def audit_model_health(request: Request) -> dict[str, Any]:
+    """Pengawasan 90 hari (DEMO): Q/D/P/O, Trust, audit akurasi dan rekomendasi dari CSV bukti.
+
+    Stateless and read-only: never runs Stage 1/2 or P1-P3, never stores the upload, never retrains.
+    """
+    rules = audit_rules()
+    body = await request_json(request)
+    if not isinstance(body, dict) or not isinstance(body.get("csv"), str) or set(body) - {"csv", "as_of"}:
+        raise BatchError("INVALID_BODY", "Provide {\"csv\": \"...\"} and optionally \"as_of\": \"YYYY-MM-DD\".")
+    as_of = body.get("as_of")
+    if as_of is not None and not isinstance(as_of, str):
+        raise BatchError("INVALID_AS_OF", "as_of must be a YYYY-MM-DD string.")
+    try:
+        return await asyncio.to_thread(model_audit.evaluate, body["csv"], rules, as_of)
+    except model_audit.AuditInputError as exc:
+        raise BatchError(exc.code, exc.message, exc.status_code) from exc
 
 
 @app.post("/monitor")

@@ -1,0 +1,98 @@
+{
+  "version": "model-health-audit-demo-v1",
+  "label": "AMBANG DEMO — BELUM DIKALIBRASI",
+  "notes": [
+    "Semua bobot, ambang, dan rentang di file ini adalah aturan demonstrasi untuk prototipe NSC 2026, belum dikalibrasi di lapangan.",
+    "Trust Score menilai kesehatan operasional (input, drift, pipeline, kewajaran output), bukan probabilitas prediksi benar.",
+    "Audit akurasi adalah evaluasi P3 yang diterbitkan terhadap RH referensi terverifikasi; audit bukan inferensi.",
+    "Sumber: PPT Grand Final slide 'Yang mengawasi RINTIK' (Trust = 0,40Q + 0,30D + 0,20P + 0,10O; rentang fisik suhu 5–50 °C) dan blueprint halaman 10, 11, 16 (band 85/70, RMSE ≤ 6, |bias| ≤ 2, jendela 7 hari)."
+  ],
+  "weights": {"Q": 0.40, "D": 0.30, "P": 0.20, "O": 0.10},
+  "bands": {"healthy_min": 85, "caution_min": 70},
+  "slots_per_day": 48,
+  "slot_minutes": 30,
+  "min_slots_assessable": 24,
+  "critical_features": ["air_temperature", "co2", "pressure"],
+  "sensor_features": [
+    "co2", "pressure", "air_temperature",
+    "soil_ec_line1", "soil_humidity_line1", "soil_temp_line1",
+    "soil_ec_line2", "soil_humidity_line2", "soil_temp_line2",
+    "soil_ec_line3", "soil_humidity_line3", "soil_temp_line3",
+    "water_volume_line1", "water_volume_line2", "water_volume_line3",
+    "gdd", "standard_day_degree", "daily_mean_temperature",
+    "daily_max_above_Tbase", "daily_max", "daily_max_reduction", "ontario_units"
+  ],
+  "physical_ranges": {
+    "air_temperature": [5, 50],
+    "co2": [300, 2000],
+    "pressure": [950, 1050],
+    "soil_ec_line1": [0, 3000], "soil_ec_line2": [0, 3000], "soil_ec_line3": [0, 3000],
+    "soil_humidity_line1": [0, 100], "soil_humidity_line2": [0, 100], "soil_humidity_line3": [0, 100],
+    "soil_temp_line1": [0, 50], "soil_temp_line2": [0, 50], "soil_temp_line3": [0, 50],
+    "water_volume_line1": [-1000, 200000], "water_volume_line2": [-1000, 200000], "water_volume_line3": [-1000, 200000],
+    "gdd": [-5, 5000],
+    "standard_day_degree": [-10, 40],
+    "daily_mean_temperature": [0, 50],
+    "daily_max_above_Tbase": [-10, 45],
+    "daily_max": [0, 55],
+    "daily_max_reduction": [0, 40],
+    "ontario_units": [0, 60]
+  },
+  "spike_limits_per_slot": {"air_temperature": 8.0, "co2": 300.0, "pressure": 6.0},
+  "q": {
+    "weights": {"slot_completeness": 0.25, "critical_completeness": 0.30, "other_completeness": 0.15, "validity": 0.30},
+    "other_completeness_full_credit": 0.85,
+    "invalid_penalty_critical": 0.05,
+    "invalid_penalty_other": 0.01,
+    "critical_failure_missing_share": 0.25,
+    "critical_failure_invalid_share": 0.25,
+    "critical_failure_min_slot_share": 0.5,
+    "critical_completeness": "min",
+    "critical_failure_q_cap": 40
+  },
+  "d": {
+    "baseline_file": "train_feature_baseline.json",
+    "baseline_sha256": "529d52328601cbd784db9d71581570603d0b9c695cf9fec2dd9c29fe5715269a",
+    "z_free": 1.0,
+    "z_full": 3.0,
+    "outside_free": 0.10,
+    "outside_full": 0.60,
+    "min_values_per_feature": 24,
+    "min_feature_share": 0.5
+  },
+  "p": {
+    "stages": ["ingest", "stage1", "stage2", "reconstruct", "post1", "post2", "post3"],
+    "final_stage": "post3",
+    "weights": {"completed_share": 0.6, "valid_output_share": 0.4},
+    "error_code_penalty": 10
+  },
+  "o": {
+    "spike_points_per_slot": 15.0,
+    "spike_penalty": 4,
+    "spike_penalty_cap": 40,
+    "flatline_slots": 12,
+    "flatline_tolerance": 0.05,
+    "flatline_penalty": 25,
+    "min_daily_amplitude": 3.0,
+    "low_amplitude_penalty": 15
+  },
+  "publication": {"min_trust": 70},
+  "issue_thresholds": {"drift_D_below": 70, "pipeline_P_below": 90, "output_O_below": 80},
+  "audit": {
+    "window_days": 7,
+    "accepted_reference_status": ["verified_simulated"],
+    "rmse_max": 6.0,
+    "abs_bias_max": 2.0,
+    "min_pairs": 300,
+    "day_start": "06:00",
+    "day_end": "18:00",
+    "humidity_extreme_low": 40.0,
+    "humidity_extreme_high": 85.0
+  },
+  "decision": {
+    "healthy_input_Q_min": 85,
+    "healthy_pipeline_P_min": 90,
+    "acceptable_drift_D_min": 70,
+    "recovery_trust_min": 85
+  }
+}

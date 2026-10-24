@@ -1,0 +1,25 @@
+{
+  "generator": "scripts/build_audit_demo_datasets.py",
+  "period": "2026-01-01..2026-03-31",
+  "slots_per_day": 48,
+  "synthetic": true,
+  "field_measurement": false,
+  "files": {
+    "rintik_demo_001.csv": {
+      "sha256": "6b8d3cdfe7d59d2778546ffd9b4ff997c554d403da5bd1af44402c28eba917df",
+      "rows": 4320,
+      "seed": 20260101
+    },
+    "rintik_demo_002.csv": {
+      "sha256": "d2c75da4aca3e13fd7d2517d583d648da570b6bb254511bcd776e552fec66d42",
+      "rows": 4320,
+      "seed": 20260202
+    },
+    "rintik_demo_003.csv": {
+      "sha256": "5e6574227eb43c3e6ecb0f7d006b1ede2db6adc3ed9f3a6e35f3cbdc49aa5b84",
+      "rows": 4320,
+      "seed": 20260303
+    }
+  },
+  "note": "Neutral file names; no scenario labels, scores or decisions inside the CSVs. See docs/AUDIT_DEMO_DATASETS.md."
+}

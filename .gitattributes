@@ -1,3 +1,5 @@
 artifacts/inference_state.json text eol=lf
 fixtures/operational_2026_exogenous.csv text eol=lf
 *.sh text eol=lf
+audit/*.json text eol=lf
+fixtures/audit_demo/* text eol=lf
