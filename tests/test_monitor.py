@@ -211,6 +211,21 @@ class MonitorEndpointTests(unittest.IsolatedAsyncioTestCase):
         r = await self.client.post("/monitor", json={"rows": early})
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (400, "MONITOR_INPUT_OUT_OF_RANGE"))
 
+    async def test_row_limit_matches_the_2000_rows_promised_by_the_ui(self):
+        full = pd.read_csv(OFFICIAL_DIR / "test.csv")
+        rows = [
+            {k: (None if pd.isna(v) else v) for k, v in row.items()}
+            for row in full.assign(air_humidity=60.0).to_dict(orient="records")
+        ]
+        self.assertGreater(len(rows), api.MAX_ROWS - 300)
+        later = [dict(row, datetime=row["datetime"].replace("2023-", "2024-", 1)) for row in rows]
+        # 1 468 rows: above the 1 000-row limit of other routes, accepted here.
+        r = await self.client.post("/monitor", json={"rows": rows + later})
+        self.assertNotEqual(r.json().get("error", {}).get("code"), "TOO_MANY_ROWS", r.text)
+        too_many = (rows * 3)[: api.MONITOR_MAX_ROWS + 1]
+        r = await self.client.post("/monitor", json={"rows": too_many})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (413, "TOO_MANY_ROWS"))
+
     async def test_model_unavailable_has_no_fallback(self):
         api.SERVICE = None
         r = await self.client.post("/monitor", json={"rows": self.rows(50.0)})

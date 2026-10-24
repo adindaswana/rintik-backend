@@ -81,6 +81,8 @@ SESSION_DIR = Path(os.environ.get(
 MAX_SESSIONS = int(os.environ.get("RINTIK_MAX_SESSIONS", "64"))
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 1000
+# Pemeriksaan Sensor promises (UI, Vercel proxy, README) up to 2000 uploaded rows; it is stateless.
+MONITOR_MAX_ROWS = 2000
 
 SERVICE: DailyBatchService | None = None
 MONITORING: MonitoringService | None = None
@@ -235,13 +237,13 @@ async def request_json(request: Request) -> Any:
         raise BatchError("INVALID_JSON", "Request body must be valid JSON.") from exc
 
 
-def frame_from_body(body: Any) -> pd.DataFrame:
+def frame_from_body(body: Any, max_rows: int = MAX_ROWS) -> pd.DataFrame:
     if not isinstance(body, dict):
         raise BatchError("INVALID_BODY", "Request body must be a JSON object.")
     if isinstance(body.get("rows"), list):
         rows = body["rows"]
-        if len(rows) > MAX_ROWS:
-            raise BatchError("TOO_MANY_ROWS", f"At most {MAX_ROWS} rows are accepted.", 413)
+        if len(rows) > max_rows:
+            raise BatchError("TOO_MANY_ROWS", f"At most {max_rows} rows are accepted.", 413)
         return pd.DataFrame(rows)
     if isinstance(body.get("csv"), str):
         csv_text = body["csv"]
@@ -251,8 +253,8 @@ def frame_from_body(body: Any) -> pd.DataFrame:
             frame = pd.read_csv(io.StringIO(csv_text), on_bad_lines="error")
         except Exception as exc:
             raise BatchError("INVALID_CSV", "CSV could not be parsed safely.") from exc
-        if len(frame) > MAX_ROWS:
-            raise BatchError("TOO_MANY_ROWS", f"At most {MAX_ROWS} rows are accepted.", 413)
+        if len(frame) > max_rows:
+            raise BatchError("TOO_MANY_ROWS", f"At most {max_rows} rows are accepted.", 413)
         return frame
     raise BatchError("INVALID_BODY", "Provide either a rows array or a csv string.")
 
@@ -610,7 +612,7 @@ async def monitor_uploaded_sensor(request: Request) -> dict[str, Any]:
     """
     service = require_service()
     body = await request_json(request)
-    frame = frame_from_body(body)
+    frame = frame_from_body(body, MONITOR_MAX_ROWS)
     comparator = body.get("comparator") or "p3"
     if comparator not in sensor_check.RULES["center"]:
         raise BatchError("INVALID_COMPARATOR", "comparator must be p3 or inti.")
